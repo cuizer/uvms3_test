@@ -1,0 +1,28 @@
+/**:
+  ros__parameters:
+
+    # 臂名称与通信
+    arm_name: "test_arm"
+    can_interface: "can0"                # 你的 CAN 口
+    arm_side: "left"                     # 左臂（单臂测试）
+    base_frame: "base_link"
+    ee_frame: "ee_link"
+
+    # 发布频率
+    publish_rate_hz: 50.0
+    debug_mode: false
+
+    # 单电机 → 只写 1 个关节
+    joint_names: ["joint1"]
+    joint.position_limit_min: [-3.14159]
+    joint.position_limit_max: [3.14159]
+    joint.max_velocity: [2.0]
+
+    # 安全保护
+    safety.max_current: 500.0
+    safety.max_temperature: 100.0
+    safety.communication_timeout_sec: 0.2
+
+    # 启动策略
+    require_initial_pose_before_activate: true
+    fault_stop_on_comm_loss: true

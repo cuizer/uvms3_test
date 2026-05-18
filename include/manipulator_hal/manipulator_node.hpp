@@ -1,14 +1,12 @@
-#pragma once
+#ifndef UVMS_HAL_MANIPULATOR_MANIPULATOR_NODE_HPP
+#define UVMS_HAL_MANIPULATOR_MANIPULATOR_NODE_HPP
 
-#include <cstdint>
-#include <map>
-#include <memory>
-#include <string>
-#include <vector>
-
-#include "rclcpp/rclcpp.hpp"
-#include "rclcpp_lifecycle/lifecycle_node.hpp"
-#include "rclcpp_lifecycle/lifecycle_publisher.hpp"
+#include <rclcpp/rclcpp.hpp>
+#include <rclcpp_lifecycle/lifecycle_node.hpp>
+#include <rclcpp_lifecycle/lifecycle_publisher.hpp>
+#include "can_driver.hpp"
+#include "protocol_parser.hpp"
+#include "safety_manager.hpp"
 
 #include "trajectory_msgs/msg/joint_trajectory_point.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
@@ -16,10 +14,6 @@
 #include "std_msgs/msg/string.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_srvs/srv/set_bool.hpp"
-
-#include "manipulator_hal/protocol_parser.hpp"
-#include "manipulator_hal/can_driver.hpp"
-#include "manipulator_hal/safety_manager.hpp"
 
 namespace uvms_hal_manipulator
 {
@@ -42,9 +36,6 @@ protected:
     CallbackReturn on_error(const rclcpp_lifecycle::State& state) override;
 
 private:
-    // ----------------------------
-    // ROS callbacks
-    // ----------------------------
     void joint_cmd_callback(
         const trajectory_msgs::msg::JointTrajectoryPoint::SharedPtr msg);
 
@@ -54,14 +45,12 @@ private:
 
     void timer_callback();
 
-    // ----------------------------
-    // Internal helpers
-    // ----------------------------
     void declare_and_load_parameters();
     bool init_safety_config();
     bool init_can_driver();
     void reset_runtime_state();
 
+    // 修正：双臂共用一个CAN口，用 arm_side + can_id 匹配本臂电机ID
     bool is_my_motor_id(uint32_t can_id) const;
     void build_expected_motor_id_list();
     void update_initial_pose_completion();
@@ -73,19 +62,11 @@ private:
     void publish_end_effector_pose();
     void publish_status(const std::string& text);
 
-    std::vector<double> int16_array_to_double_vector_2(
-        const std::array<int16_t, 2>& arr) const;
-
-    std::vector<double> int16_array_to_double_vector_10(
-        const std::array<int16_t, 10>& arr) const;
-
-    std::vector<double> uint16_array_to_double_vector_10(
-        const std::array<uint16_t, 10>& arr) const;
+    std::vector<double> int16_array_to_double_vector_2(const std::array<int16_t, 2>& arr) const;
+    std::vector<double> int16_array_to_double_vector_10(const std::array<int16_t, 10>& arr) const;
+    std::vector<double> uint16_array_to_double_vector_10(const std::array<uint16_t, 10>& arr) const;
 
 private:
-    // ----------------------------
-    // Parameters
-    // ----------------------------
     std::string arm_name_;
     std::string can_interface_;
     std::string base_frame_;
@@ -102,9 +83,6 @@ private:
     double max_temperature_{100.0};
     double comm_timeout_sec_{0.2};
 
-    // ----------------------------
-    // ROS interfaces
-    // ----------------------------
     rclcpp::Subscription<trajectory_msgs::msg::JointTrajectoryPoint>::SharedPtr joint_cmd_sub_;
     rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr emergency_stop_srv_;
 
@@ -115,16 +93,10 @@ private:
 
     rclcpp::TimerBase::SharedPtr timer_;
 
-    // ----------------------------
-    // Core modules
-    // ----------------------------
     ProtocolParser protocol_parser_;
     CanDriver can_driver_;
     SafetyManager safety_manager_;
 
-    // ----------------------------
-    // Runtime states
-    // ----------------------------
     rclcpp::Time last_rx_time_;
     bool communication_ok_{false};
 
@@ -136,28 +108,19 @@ private:
     ArmMotorState latest_arm_motor_state_{};
     ArmControllerState latest_arm_controller_state_{};
 
-    // 共享 can0 场景下的左右臂身份标识
     std::string arm_side_;
-
-    // activate 前是否要求完成本臂初始位姿同步
     bool require_initial_pose_before_activate_{true};
-
-    // 本臂初始位姿是否已经全部获取完成
     bool initial_pose_complete_{false};
-
-    // active 后是否允许执行控制命令
     bool control_enabled_{false};
 
-    // 本臂目标电机 ID 列表
     std::vector<uint32_t> expected_motor_ids_;
-
-    // 每个目标电机是否已收到至少一次有效反馈
     std::map<uint32_t, bool> motor_ready_map_;
 
-    // 通信故障停机相关状态
     bool communication_lost_latched_{false};
     bool fault_stop_requested_{false};
     bool fault_stop_on_comm_loss_{true};
 };
 
 }  // namespace uvms_hal_manipulator
+
+#endif

@@ -5,41 +5,36 @@ import os
 
 
 def generate_launch_description():
-    pkg_share = get_package_share_directory('hal')
+    # 你的包名 = uvms_hal_manipulator
+    pkg_share = get_package_share_directory('uvms_hal_manipulator')
 
     left_arm_params = os.path.join(pkg_share, 'config', 'left_arm.yaml')
     right_arm_params = os.path.join(pkg_share, 'config', 'right_arm.yaml')
 
-    # 左臂生命周期节点
+    # ---------------- 左臂驱动节点 ----------------
     left_arm_node = LifecycleNode(
-        package='hal',
-        executable='hal_manipulator_node',
+        package='uvms_hal_manipulator',      # 修正包名
+        executable='manipulator_driver',    # 修正可执行文件
         name='manipulator_driver',
         namespace='left_arm',
         output='screen',
         parameters=[left_arm_params]
     )
 
-    # 右臂生命周期节点
+    # ---------------- 右臂驱动节点 ----------------
     right_arm_node = LifecycleNode(
-        package='hal',
-        executable='hal_manipulator_node',
+        package='uvms_hal_manipulator',      # 修正包名
+        executable='manipulator_driver',    # 修正可执行文件
         name='manipulator_driver',
         namespace='right_arm',
         output='screen',
         parameters=[right_arm_params]
     )
 
-    # 双臂生命周期管理节点
-    # 作用：
-    # 1. 监听左右臂 fault 话题
-    # 2. 任意一臂故障时，统一将左右臂切换到 inactive
-    # 3. 报警并等待人工介入
-    # 4. 不自动 cleanup
-    # 5. 不自动重新 configure
+    # ---------------- 双臂故障管理节点 ----------------
     dual_arm_manager_node = Node(
-        package='hal',
-        executable='dual_arm_lifecycle_manager',
+        package='uvms_hal_manipulator',            # 修正包名
+        executable='dual_arm_lifecycle_manager',   # 你的可执行文件
         name='dual_arm_lifecycle_manager',
         output='screen'
     )
