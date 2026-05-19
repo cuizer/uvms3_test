@@ -1,8 +1,12 @@
 #include "uvms_hal_manipulator/manipulator_node.hpp"
+#include "lifecycle_msgs/msg/state.hpp"
 #include <rclcpp/executors/single_threaded_executor.hpp>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <vector>
+#include <chrono>
+#include <thread>
 
 namespace uvms_hal_manipulator
 {
@@ -213,6 +217,28 @@ bool ManipulatorLifecycleNode::init_can_driver()
         return false;
     }
     can_driver_.flush();
+
+    // 在这里加代码！开机发送电机启动指令！
+    // ==============================================
+    RCLCPP_INFO(get_logger(), "Sending motor start upload command to all motors...");
+
+    // 左臂电机 ID：1、3、5、7、9
+    // 右臂电机 ID：2、4、6、8、10
+    std::vector<uint32_t> motor_ids = {1,2,3,4,5,6,7,8,9,10};
+
+    for (uint32_t id : motor_ids) {
+        CanFrame frame;
+        frame.can_id = id;      // 标准帧 ID
+        frame.dlc = 5;          // 数据长度 5
+        frame.data[0] = 0x01;   // 指令：启动自动上传
+        frame.data[1] = 0x00;
+        frame.data[2] = 0x00;
+        frame.data[3] = 0x00;
+        frame.data[4] = 0x00;
+        can_driver_.write_frame(frame);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
     return true;
 }
 
