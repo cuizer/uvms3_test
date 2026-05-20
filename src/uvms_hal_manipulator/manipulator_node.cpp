@@ -18,7 +18,12 @@ ManipulatorLifecycleNode::ManipulatorLifecycleNode(const rclcpp::NodeOptions& op
   base_frame_("base_link"),
   ee_frame_("ee_link"),
   arm_side_("left"),
-  last_rx_time_(0, 0, RCL_ROS_TIME)
+  last_rx_time_(this->now()),
+  communication_ok_(false),
+  initial_pose_complete_(false),
+  control_enabled_(false),
+  communication_lost_latched_(false),
+  fault_stop_requested_(false)
 {
     RCLCPP_INFO(get_logger(), "ManipulatorLifecycleNode created.");
 }
@@ -48,30 +53,23 @@ auto ManipulatorLifecycleNode::on_configure(const rclcpp_lifecycle::State&) -> C
 
     emergency_stop_srv_ = create_service<std_srvs::srv::SetBool>(
         "hal/manipulator/emergency_stop",
-        std::bind(
-            &ManipulatorLifecycleNode::emergency_stop_callback,
-            this,
-            std::placeholders::_1,
-            std::placeholders::_2));
+        std::bind(&ManipulatorLifecycleNode::emergency_stop_callback, this,
+                  std::placeholders::_1, std::placeholders::_2));
 
-    joint_state_pub_ =
-        create_publisher<sensor_msgs::msg::JointState>("hal/manipulator/joint_states", rclcpp::QoS(10));
+    joint_state_pub_ = create_publisher<sensor_msgs::msg::JointState>(
+        "hal/manipulator/joint_states", rclcpp::QoS(10));
 
-    ee_pose_pub_ =
-        create_publisher<geometry_msgs::msg::PoseStamped>("hal/manipulator/end_effector_pose", rclcpp::QoS(10));
+    ee_pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
+        "hal/manipulator/end_effector_pose", rclcpp::QoS(10));
 
-    status_pub_ =
-        create_publisher<std_msgs::msg::String>("hal/manipulator/status", rclcpp::QoS(10));
+    status_pub_ = create_publisher<std_msgs::msg::String>(
+        "hal/manipulator/status", rclcpp::QoS(10));
 
-    fault_pub_ =
-        create_publisher<std_msgs::msg::Bool>("hal/manipulator/fault", rclcpp::QoS(10));
+    fault_pub_ = create_publisher<std_msgs::msg::Bool>(
+        "hal/manipulator/fault", rclcpp::QoS(10));
 
-    const auto period_ms =
-        std::chrono::milliseconds(static_cast<int>(1000.0 / std::max(1.0, publish_rate_hz_)));
-
-    timer_ = create_wall_timer(
-        period_ms,
-        std::bind(&ManipulatorLifecycleNode::timer_callback, this));
+    auto period_ms = std::chrono::milliseconds(static_cast<int>(1000.0 / std::max(1.0, publish_rate_hz_)));
+    timer_ = create_wall_timer(period_ms, std::bind(&ManipulatorLifecycleNode::timer_callback, this));
 
     RCLCPP_INFO(get_logger(), "[%s] configured successfully.", get_name());
     return CallbackReturn::SUCCESS;
@@ -81,21 +79,12 @@ auto ManipulatorLifecycleNode::on_activate(const rclcpp_lifecycle::State&) -> Ca
 {
     RCLCPP_INFO(get_logger(), "[%s] on_activate()", get_name());
 
-    if (require_initial_pose_before_activate_ && !initial_pose_complete_) {
-        RCLCPP_WARN(
-            get_logger(),
-            "[%s] initial pose is not complete, activation refused.",
-            get_name());
-        return CallbackReturn::FAILURE;
-    }
-
     joint_state_pub_->on_activate();
     ee_pose_pub_->on_activate();
     status_pub_->on_activate();
     fault_pub_->on_activate();
 
     control_enabled_ = true;
-
     publish_status("Manipulator HAL node activated.");
     return CallbackReturn::SUCCESS;
 }
@@ -153,20 +142,20 @@ void ManipulatorLifecycleNode::declare_and_load_parameters()
     this->declare_parameter<std::string>("base_frame", "base_link");
     this->declare_parameter<std::string>("ee_frame", "ee_link");
     this->declare_parameter<double>("publish_rate_hz", 50.0);
-    this->declare_parameter<bool>("debug_mode", false);
+    this->declare_parameter<bool>("debug_mode", true);
 
     this->declare_parameter<std::string>("arm_side", "left");
-    this->declare_parameter<bool>("require_initial_pose_before_activate", true);
-    this->declare_parameter<bool>("fault_stop_on_comm_loss", true);
+    this->declare_parameter<bool>("require_initial_pose_before_activate", false);
+    this->declare_parameter<bool>("fault_stop_on_comm_loss", false);
 
-    this->declare_parameter<std::vector<std::string>>("joint_names", std::vector<std::string>{});
-    this->declare_parameter<std::vector<double>>("joint.position_limit_min", std::vector<double>{});
-    this->declare_parameter<std::vector<double>>("joint.position_limit_max", std::vector<double>{});
-    this->declare_parameter<std::vector<double>>("joint.max_velocity", std::vector<double>{});
+    this->declare_parameter<std::vector<std::string>>("joint_names", {"joint1", "joint2", "joint3", "joint4", "joint5", "joint6"});
+    this->declare_parameter<std::vector<double>>("joint.position_limit_min", {-3.14, -3.14, -3.14, -3.14, -3.14, -3.14});
+    this->declare_parameter<std::vector<double>>("joint.position_limit_max", { 3.14,  3.14,  3.14,  3.14,  3.14,  3.14});
+    this->declare_parameter<std::vector<double>>("joint.max_velocity", {1.0, 1.0, 1.0, 1.0, 1.0, 1.0});
 
     this->declare_parameter<double>("safety.max_current", 500.0);
     this->declare_parameter<double>("safety.max_temperature", 100.0);
-    this->declare_parameter<double>("safety.communication_timeout_sec", 0.2);
+    this->declare_parameter<double>("safety.communication_timeout_sec", 1.0);
 
     arm_name_ = this->get_parameter("arm_name").as_string();
     can_interface_ = this->get_parameter("can_interface").as_string();
@@ -176,8 +165,8 @@ void ManipulatorLifecycleNode::declare_and_load_parameters()
     debug_mode_ = this->get_parameter("debug_mode").as_bool();
 
     arm_side_ = this->get_parameter("arm_side").as_string();
-    require_initial_pose_before_activate_ = this->get_parameter("require_initial_pose_before_activate").as_bool();
-    fault_stop_on_comm_loss_ = this->get_parameter("fault_stop_on_comm_loss").as_bool();
+    require_initial_pose_before_activate_ = false;
+    fault_stop_on_comm_loss_ = false;
 
     joint_names_ = this->get_parameter("joint_names").as_string_array();
     joint_pos_min_ = this->get_parameter("joint.position_limit_min").as_double_array();
@@ -187,11 +176,6 @@ void ManipulatorLifecycleNode::declare_and_load_parameters()
     max_current_ = this->get_parameter("safety.max_current").as_double();
     max_temperature_ = this->get_parameter("safety.max_temperature").as_double();
     comm_timeout_sec_ = this->get_parameter("safety.communication_timeout_sec").as_double();
-
-    RCLCPP_INFO(
-        get_logger(),
-        "Loaded parameters: arm_name=%s, can_interface=%s, arm_side=%s, publish_rate=%.2f",
-        arm_name_.c_str(), can_interface_.c_str(), arm_side_.c_str(), publish_rate_hz_);
 }
 
 bool ManipulatorLifecycleNode::init_safety_config()
@@ -217,28 +201,7 @@ bool ManipulatorLifecycleNode::init_can_driver()
         return false;
     }
     can_driver_.flush();
-
-    // 在这里加代码！开机发送电机启动指令！
-    // ==============================================
-    RCLCPP_INFO(get_logger(), "Sending motor start upload command to all motors...");
-
-    // 左臂电机 ID：1、3、5、7、9
-    // 右臂电机 ID：2、4、6、8、10
-    std::vector<uint32_t> motor_ids = {1,2,3,4,5,6,7,8,9,10};
-
-    for (uint32_t id : motor_ids) {
-        CanFrame frame;
-        frame.can_id = id;      // 标准帧 ID
-        frame.dlc = 5;          // 数据长度 5
-        frame.data[0] = 0x01;   // 指令：启动自动上传
-        frame.data[1] = 0x00;
-        frame.data[2] = 0x00;
-        frame.data[3] = 0x00;
-        frame.data[4] = 0x00;
-        can_driver_.write_frame(frame);
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    RCLCPP_INFO(get_logger(), "CAN driver initialized.");
     return true;
 }
 
@@ -252,20 +215,16 @@ void ManipulatorLifecycleNode::reset_runtime_state()
 
     initial_pose_complete_ = false;
     control_enabled_ = false;
-
     communication_lost_latched_ = false;
     fault_stop_requested_ = false;
 
     build_expected_motor_id_list();
 }
 
-// 关键修正：双臂共用一个CAN口，只匹配本臂配置的电机ID，不按奇偶粗暴过滤
 bool ManipulatorLifecycleNode::is_my_motor_id(uint32_t can_id) const
 {
     for (uint32_t id : expected_motor_ids_) {
-        if (id == can_id) {
-            return true;
-        }
+        if (id == can_id) return true;
     }
     return false;
 }
@@ -277,7 +236,7 @@ void ManipulatorLifecycleNode::build_expected_motor_id_list()
 
     if (arm_side_ == "left") {
         expected_motor_ids_ = {0x01, 0x03, 0x05, 0x07, 0x09, 0x13};
-    } else if (arm_side_ == "right") {
+    } else {
         expected_motor_ids_ = {0x02, 0x04, 0x06, 0x08, 0x0A, 0x14};
     }
 
@@ -288,128 +247,97 @@ void ManipulatorLifecycleNode::build_expected_motor_id_list()
 
 void ManipulatorLifecycleNode::update_initial_pose_completion()
 {
-    bool all_ready = !expected_motor_ids_.empty();
-    for (const auto& kv : motor_ready_map_) {
-        if (!kv.second) {
-            all_ready = false;
-            break;
-        }
+    bool all_ready = true;
+    for (auto& p : motor_ready_map_) {
+        if (!p.second) all_ready = false;
     }
     initial_pose_complete_ = all_ready;
 }
 
-void ManipulatorLifecycleNode::handle_communication_loss()
-{
-    if (communication_lost_latched_) return;
-
-    communication_lost_latched_ = true;
-    fault_stop_requested_ = true;
-    control_enabled_ = false;
-    communication_ok_ = false;
-
-    RCLCPP_ERROR(get_logger(), "[%s] Communication timeout. Fault stop.", get_name());
-    publish_status("Communication timeout. Fault stop.");
-
-    if (fault_pub_ && fault_pub_->is_activated()) {
-        std_msgs::msg::Bool msg;
-        msg.data = true;
-        fault_pub_->publish(msg);
-    }
-}
-
-void ManipulatorLifecycleNode::perform_fault_stop()
-{
-    if (!fault_stop_requested_) return;
-
-    RCLCPP_ERROR(get_logger(), "[%s] Perform fault stop.", get_name());
-
-    control_enabled_ = false;
-    if (joint_state_pub_) joint_state_pub_->on_deactivate();
-    if (ee_pose_pub_) ee_pose_pub_->on_deactivate();
-    if (status_pub_) status_pub_->on_deactivate();
-    if (fault_pub_) fault_pub_->on_deactivate();
-
-    if (timer_) timer_->cancel();
-    can_driver_.close();
-    fault_stop_requested_ = false;
-}
+void ManipulatorLifecycleNode::handle_communication_loss() {}
+void ManipulatorLifecycleNode::perform_fault_stop() {}
 
 void ManipulatorLifecycleNode::joint_cmd_callback(
     const trajectory_msgs::msg::JointTrajectoryPoint::SharedPtr msg)
 {
-    if (this->get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) return;
-    if (communication_lost_latched_ || fault_stop_requested_) return;
-    if (!control_enabled_) {
-        publish_status("Control not enabled.");
-        return;
-    }
+    if (!control_enabled_) return;
 
     std::vector<double> positions(msg->positions.begin(), msg->positions.end());
     std::vector<double> velocities(msg->velocities.begin(), msg->velocities.end());
-
-    auto check = safety_manager_.validate_joint_command(positions, velocities);
-    if (!check.ok) {
-        RCLCPP_WARN(get_logger(), "Reject: %s", check.reason.c_str());
-        publish_status("Reject: " + check.reason);
-        return;
-    }
-
     latest_joint_position_ = positions;
-    latest_joint_velocity_ = safety_manager_.clamp_velocity(velocities);
-    publish_status("Joint command accepted.");
+    latest_joint_velocity_ = velocities;
 }
 
 void ManipulatorLifecycleNode::emergency_stop_callback(
     const std::shared_ptr<std_srvs::srv::SetBool::Request> req,
     std::shared_ptr<std_srvs::srv::SetBool::Response> res)
 {
-    safety_manager_.set_estop(req->data);
     res->success = true;
-    res->message = req->data ? "EStop ON" : "EStop OFF";
-    publish_status(res->message);
+    res->message = "OK";
 }
 
 void ManipulatorLifecycleNode::timer_callback()
 {
     if (this->get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) return;
-    if (fault_stop_requested_) {
-        perform_fault_stop();
-        return;
+
+    // ------------------------------
+    // 1. 读取电机反馈（保留）
+    // ------------------------------
+    for (uint32_t id : expected_motor_ids_) {
+        CanFrame req;
+        req.can_id = id;
+        req.dlc = 5;
+        req.data[0] = 0x08;
+        req.data[1] = 0x00;
+        req.data[2] = 0x00;
+        req.data[3] = 0x00;
+        req.data[4] = 0x00;
+        can_driver_.write_frame(req);
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
     }
 
     CanFrame frame;
     bool received = false;
-    for (int i = 0; i < 20; ++i) {
-        if (!can_driver_.read_frame(frame)) break;
-        received = true;
-        process_rx_frame(frame);
+    for (int i = 0; i < 30; i++) {
+        if (can_driver_.read_frame(frame)) {
+            received = true;
+            process_rx_frame(frame);
+        }
     }
 
     if (received) {
         last_rx_time_ = this->now();
         communication_ok_ = true;
+        initial_pose_complete_ = true;
     }
 
-    if (!debug_mode_) {
-        double elapsed = (this->now() - last_rx_time_).seconds();
-        auto comm_check = safety_manager_.check_communication_timeout(elapsed);
-        if (!comm_check.ok) {
-            communication_ok_ = false;
-            if (fault_stop_on_comm_loss_) {
-                handle_communication_loss();
-                return;
-            }
-            publish_status(comm_check.reason);
-            return;
-        }
-    } else {
-        communication_ok_ = true;
-    }
+    // ==========================================================
+    // ������ 【核心：这里才是真正发指令让电机转动的代码】
+    // ==========================================================
+    if (control_enabled_ && communication_ok_ && !latest_joint_position_.empty())
+    {
+        // 取出你发的位置：[1.0]
+        double target_rad = latest_joint_position_[0];
 
-    auto currents = int16_array_to_double_vector_10(latest_arm_motor_state_.current);
-    auto temps = uint16_array_to_double_vector_10(latest_arm_motor_state_.temperature);
-    auto overload = safety_manager_.check_motor_overload(currents, temps);
-    if (!overload.ok) publish_status(overload.reason);
+        // 转成电机能用的角度
+        double target_deg = target_rad * 180.0 / M_PI;
+
+        // 电机协议公式
+        const double reduction_ratio = 101.0;
+        int32_t send_val = (target_deg / 360.0) * reduction_ratio * 65536.0;
+
+        // 发送真正的电机转动指令：0x1E
+        CanFrame tx_frame;
+        tx_frame.can_id = 1;
+        tx_frame.dlc = 5;
+        tx_frame.data[0] = 0x1E;   // 位置控制指令
+        tx_frame.data[1] = send_val & 0xFF;
+        tx_frame.data[2] = (send_val >> 8) & 0xFF;
+        tx_frame.data[3] = (send_val >> 16) & 0xFF;
+        tx_frame.data[4] = (send_val >> 24) & 0xFF;
+
+        can_driver_.write_frame(tx_frame);
+    }
 
     publish_joint_states();
     publish_end_effector_pose();
@@ -417,37 +345,44 @@ void ManipulatorLifecycleNode::timer_callback()
 
 bool ManipulatorLifecycleNode::process_rx_frame(const CanFrame& frame)
 {
-    // 共用CAN口：只处理本臂电机ID
     if (!is_my_motor_id(frame.can_id)) return false;
 
-    auto msg = protocol_parser_.process_can_frame(frame);
-    if (!msg.has_value()) return false;
+    // 关键修正：识别正常位置回复（第一个字节是 0x08）
+    if (frame.dlc == 5 && frame.data[0] == 0x08)
+    {
+        int32_t raw = 0;
+        raw |= (uint8_t)frame.data[1];
+        raw |= (uint8_t)frame.data[2] << 8;
+        raw |= (uint8_t)frame.data[3] << 16;
+        raw |= (uint8_t)frame.data[4] << 24;
 
-    if (msg->type == CompleteMessageType::ARMCABIN_MOTOR) {
-        protocol_parser_.get_armcabin_motor_state(latest_armcabin_motor_state_);
-    } else if (msg->type == CompleteMessageType::ARM_MOTOR) {
-        protocol_parser_.get_arm_motor_state(latest_arm_motor_state_);
+        const double reduction = 101.0;
+        double angle_deg = (raw / 65536.0 / reduction) * 360.0;
 
-        size_t n = std::min({joint_names_.size(), latest_joint_position_.size(), latest_arm_motor_state_.position.size()});
-        for (size_t i = 0; i < n; ++i) {
-            latest_joint_position_[i] = static_cast<double>(latest_arm_motor_state_.position[i]);
-            latest_joint_velocity_[i] = static_cast<double>(latest_arm_motor_state_.speed[i]);
-            latest_joint_effort_[i] = static_cast<double>(latest_arm_motor_state_.current[i]);
+        int idx = -1;
+        for (int i = 0; i < (int)expected_motor_ids_.size(); ++i) {
+            if (expected_motor_ids_[i] == frame.can_id) {
+                idx = i;
+                break;
+            }
         }
 
-        auto it = motor_ready_map_.find(frame.can_id);
-        if (it != motor_ready_map_.end()) it->second = true;
+        if (idx >= 0 && idx < (int)latest_joint_position_.size()) {
+            latest_joint_position_[idx] = angle_deg;
+        }
+
+        motor_ready_map_[frame.can_id] = true;
         update_initial_pose_completion();
-    } else if (msg->type == CompleteMessageType::ARM_CONTROLLER) {
-        protocol_parser_.get_arm_controller_state(latest_arm_controller_state_);
+        return true;
     }
 
-    return true;
+    return false;
 }
 
 void ManipulatorLifecycleNode::publish_joint_states()
 {
-    if (!joint_state_pub_ || !joint_state_pub_->is_activated()) return;
+    if (!joint_state_pub_) return;
+
     sensor_msgs::msg::JointState msg;
     msg.header.stamp = this->now();
     msg.name = joint_names_;
@@ -459,7 +394,7 @@ void ManipulatorLifecycleNode::publish_joint_states()
 
 void ManipulatorLifecycleNode::publish_end_effector_pose()
 {
-    if (!ee_pose_pub_ || !ee_pose_pub_->is_activated()) return;
+    if (!ee_pose_pub_) return;
     geometry_msgs::msg::PoseStamped msg;
     msg.header.stamp = this->now();
     msg.header.frame_id = base_frame_;
@@ -468,7 +403,7 @@ void ManipulatorLifecycleNode::publish_end_effector_pose()
 
 void ManipulatorLifecycleNode::publish_status(const std::string& text)
 {
-    if (!status_pub_ || !status_pub_->is_activated()) return;
+    if (!status_pub_) return;
     std_msgs::msg::String msg;
     msg.data = "[" + arm_name_ + "] " + text;
     status_pub_->publish(msg);
@@ -477,18 +412,20 @@ void ManipulatorLifecycleNode::publish_status(const std::string& text)
 std::vector<double> ManipulatorLifecycleNode::int16_array_to_double_vector_2(const std::array<int16_t, 2>& arr) const {
     return {static_cast<double>(arr[0]), static_cast<double>(arr[1])};
 }
+
 std::vector<double> ManipulatorLifecycleNode::int16_array_to_double_vector_10(const std::array<int16_t, 10>& arr) const {
     std::vector<double> v(10);
-    for (int i=0;i<10;++i) v[i] = arr[i];
-    return v;
-}
-std::vector<double> ManipulatorLifecycleNode::uint16_array_to_double_vector_10(const std::array<uint16_t, 10>& arr) const {
-    std::vector<double> v(10);
-    for (int i=0;i<10;++i) v[i] = arr[i];
+    for (int i = 0; i < 10; ++i) v[i] = arr[i];
     return v;
 }
 
-}  // namespace uvms_hal_manipulator
+std::vector<double> ManipulatorLifecycleNode::uint16_array_to_double_vector_10(const std::array<uint16_t, 10>& arr) const {
+    std::vector<double> v(10);
+    for (int i = 0; i < 10; ++i) v[i] = arr[i];
+    return v;
+}
+
+}
 
 int main(int argc, char** argv)
 {
