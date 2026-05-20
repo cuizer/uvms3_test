@@ -28,7 +28,7 @@ DualArmLifecycleManager::DualArmLifecycleManager(const rclcpp::NodeOptions &opti
     right_change_state_client_ = this->create_client<lifecycle_msgs::srv::ChangeState>(
         "/right_arm/manipulator_driver/change_state");
 
-    RCLCPP_INFO(this->get_logger(), "DualArmLifecycleManager 启动完成，等待双臂故障信号...");
+    RCLCPP_INFO(this->get_logger(), "DualArmLifecycleManager 启动完成，等待双臂信号...");
 }
 
 void DualArmLifecycleManager::left_fault_callback(const std_msgs::msg::Bool::SharedPtr msg)
