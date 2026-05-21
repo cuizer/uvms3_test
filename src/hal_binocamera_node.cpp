@@ -397,7 +397,7 @@ void HalBinocameraNode::publishDepthImage(const std::shared_ptr<dai::ImgFrame> &
 
   depth_pub_->publish(message);
 }
-
+//eeeeeeeeeee
 dai::ColorCameraProperties::SensorResolution HalBinocameraNode::parseColorResolution(
   const std::string & value) const
 {

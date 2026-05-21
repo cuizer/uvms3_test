@@ -37,6 +37,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/HalAntenna.msg"
   "msg/CanMsgIn.msg"
   "msg/CanMsgOut.msg"
+  "msg/HalbinocameraMsg.msg" 
+  "srv/HalbinocameraSrv.srv" 
   DEPENDENCIES std_msgs builtin_interfaces
 )
 
@@ -95,6 +97,9 @@ ament_target_dependencies(hal_dvl_node rclcpp rclcpp_lifecycle std_msgs)
 add_executable(hal_inertialnavi_node src/hal_inertialnavi_node.cpp)
 ament_target_dependencies(hal_inertialnavi_node rclcpp rclcpp_lifecycle std_msgs)
 
+add_executable(hal_binocamera_node src/hal_binocamera_node.cpp) 
+ament_target_dependencies(hal_binocamera_node rclcpp rclcpp_lifecycle std_msgs sensor_msgs geometry_msgs std_srvs)
+
 add_executable(bsp_comm_node src/bsp_comm_node.cpp)
 ament_target_dependencies(bsp_comm_node rclcpp rclcpp_lifecycle std_msgs)
 
@@ -106,6 +111,7 @@ rosidl_target_interfaces(hal_thruster_node ${PROJECT_NAME} "rosidl_typesupport_c
 rosidl_target_interfaces(hal_depthsensor_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(hal_dvl_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(hal_inertialnavi_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
+rosidl_target_interfaces(hal_binocamera_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(bsp_comm_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 install(TARGETS
@@ -117,6 +123,7 @@ install(TARGETS
   hal_depthsensor_node
   hal_dvl_node
   hal_inertialnavi_node
+  hal_binocamera_node
   bsp_comm_node
   manipulator_driver
   dual_arm_lifecycle_manager
