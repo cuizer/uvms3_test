@@ -163,17 +163,26 @@ else()
     /opt/ros/humble/include/depthai-bootloader-shared
   )
   
-  # 查找depthai库文件
+  # 查找depthai-core库文件（在x86_64-linux-gnu子目录中）
   find_library(DEPTHAI_CORE_LIBRARY
-    NAMES depthai
-    PATHS /opt/ros/humble/lib
+    NAMES depthai-core
+    PATHS /opt/ros/humble/lib/x86_64-linux-gnu
     NO_DEFAULT_PATH
   )
   
   if(DEPTHAI_CORE_LIBRARY)
     target_link_libraries(hal_binocamera_node ${DEPTHAI_CORE_LIBRARY})
   else()
-    message(FATAL_ERROR "Could not find depthai library in /opt/ros/humble/lib")
+    # 再次尝试在标准lib目录中查找
+    find_library(DEPTHAI_CORE_LIBRARY_ALT
+      NAMES depthai-core
+      PATHS /opt/ros/humble/lib
+    )
+    if(DEPTHAI_CORE_LIBRARY_ALT)
+      target_link_libraries(hal_binocamera_node ${DEPTHAI_CORE_LIBRARY_ALT})
+    else()
+      message(FATAL_ERROR "Could not find depthai-core library in /opt/ros/humble/lib or /opt/ros/humble/lib/x86_64-linux-gnu")
+    endif()
   endif()
 endif()
 
