@@ -5,7 +5,6 @@
 #include <memory>
 #include <string>
 
-#include <depthai/depthai.hpp>
 #include <hal/msg/halbinocamera_msg.hpp>
 #include <hal/srv/halbinocamera_srv.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -34,6 +33,7 @@ protected:
   CallbackReturn on_shutdown(const rclcpp_lifecycle::State & state) override;
   CallbackReturn on_error(const rclcpp_lifecycle::State & state) override;
 
+
 private:
   void declareParameters();
   dai::Pipeline createPipeline();
@@ -52,9 +52,9 @@ private:
   dai::MonoCameraProperties::SensorResolution parseMonoResolution(
     const std::string & value) const;
 
-  std::unique_ptr<dai::Device> device_;
-  std::shared_ptr<dai::DataOutputQueue> color_queue_;
-  std::shared_ptr<dai::DataOutputQueue> depth_queue_;
+    // Pimpl模式隐藏depthai实现细节
+  struct Impl;
+  std::unique_ptr<Impl> pimpl_;
 
   int grab_fail_count_;
   bool is_camera_open_;

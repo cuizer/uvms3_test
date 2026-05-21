@@ -4,10 +4,15 @@
 #include <cstring>
 #include <exception>
 #include <functional>
+#include <depthai/depthai.hpp>
 
 namespace hal_binocamera
 {
-
+struct HalBinocameraNode::Impl {
+  std::unique_ptr<dai::Device> device_;
+  std::shared_ptr<dai::DataOutputQueue> color_queue_;
+  std::shared_ptr<dai::DataOutputQueue> depth_queue_;}
+  
 namespace
 {
 
@@ -26,7 +31,8 @@ HalBinocameraNode::HalBinocameraNode()
 : rclcpp_lifecycle::LifecycleNode("hal_binocamera_node"),
   grab_fail_count_(0),
   is_camera_open_(false),
-  camera_enabled_(true)
+  camera_enabled_(true),
+  pimpl_(std::make_unique<Impl>())  // 添加这行
 {
   declareParameters();
 }
@@ -211,13 +217,13 @@ bool HalBinocameraNode::openCamera()
     const auto mx_id = this->get_parameter("device_mx_id").as_string();
 
     if (mx_id.empty()) {
-      device_ = std::make_unique<dai::Device>(pipeline);
+      pimpl_->device_ = std::make_unique<dai::Device>(pipeline);
     } else {
-      device_ = std::make_unique<dai::Device>(pipeline, dai::DeviceInfo(mx_id));
+      pimpl_->device_ = std::make_unique<dai::Device>(pipeline, dai::DeviceInfo(mx_id));
     }
 
-    color_queue_ = device_->getOutputQueue(kColorStreamName, 4, false);
-    depth_queue_ = device_->getOutputQueue(kDepthStreamName, 4, false);
+    pimpl_->color_queue_ = pimpl_->device_->getOutputQueue(kColorStreamName, 4, false);
+    pimpl_->depth_queue_ = pimpl_->device_->getOutputQueue(kDepthStreamName, 4, false);
 
     grab_fail_count_ = 0;
     is_camera_open_ = true;
@@ -235,9 +241,9 @@ bool HalBinocameraNode::openCamera()
 
 void HalBinocameraNode::closeCamera()
 {
-  depth_queue_.reset();
-  color_queue_.reset();
-  device_.reset();
+  pimpl_->depth_queue_.reset();
+  pimpl_->color_queue_.reset();
+  pimpl_->device_.reset();
 
   is_camera_open_ = false;
   grab_fail_count_ = 0;
@@ -269,8 +275,8 @@ void HalBinocameraNode::captureAndPublish()
   }
 
   try {
-    auto color_frame = color_queue_ ? color_queue_->tryGet<dai::ImgFrame>() : nullptr;
-    auto depth_frame = depth_queue_ ? depth_queue_->tryGet<dai::ImgFrame>() : nullptr;
+    auto color_frame = pimpl_->color_queue_ ? pimpl_->color_queue_->tryGet<dai::ImgFrame>() : nullptr;
+    auto depth_frame = pimpl_->depth_queue_ ? pimpl_->depth_queue_->tryGet<dai::ImgFrame>() : nullptr;
 
     if (!color_frame && !depth_frame) {
       publishStatus(kCameraStatusFault);
