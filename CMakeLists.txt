@@ -152,16 +152,16 @@ if(PKG_CONFIG_FOUND)
   pkg_check_modules(DEPTHAI_PKG QUIET depthai)
 endif()
 
+# 总是设置包含目录，因为头文件在固定位置
+target_include_directories(hal_binocamera_node PRIVATE 
+  /opt/ros/humble/include/depthai
+  /opt/ros/humble/include/depthai-shared
+  /opt/ros/humble/include/depthai-bootloader-shared
+)
+
 if(DEPTHAI_PKG_FOUND)
-  target_include_directories(hal_binocamera_node PRIVATE ${DEPTHAI_PKG_INCLUDE_DIRS})
   target_link_libraries(hal_binocamera_node ${DEPTHAI_PKG_LIBRARIES})
 else()
-  # 如果pkg-config没找到，使用已知的系统路径
-  target_include_directories(hal_binocamera_node PRIVATE 
-    /opt/ros/humble/include/depthai
-    /opt/ros/humble/include/depthai-shared
-    /opt/ros/humble/include/depthai-bootloader-shared
-  )
   
   # 查找depthai-core库文件（在x86_64-linux-gnu子目录中）
   find_library(DEPTHAI_CORE_LIBRARY
