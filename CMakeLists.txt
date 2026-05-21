@@ -145,4 +145,49 @@ ament_export_dependencies(
   trajectory_msgs
 )
 
+# 查找DepthAI库
+find_program(PYTHON3_EXECUTABLE NAMES python3)
+if(PYTHON3_EXECUTABLE)
+  execute_process(
+    COMMAND ${PYTHON3_EXECUTABLE} -c "import depthai; import os; print(os.path.dirname(depthai.__file__), end='')"
+    OUTPUT_VARIABLE DEPTHAI_PYTHON_PATH
+    RESULT_VARIABLE PYTHON_IMPORT_RESULT
+    ERROR_QUIET
+  )
+  
+  if(NOT ${PYTHON_IMPORT_RESULT})
+    # 如果找到了Python的depthai路径，添加包含目录
+    find_path(DEPTHAI_INCLUDE_DIR
+      NAMES depthai.hpp
+      PATHS ${DEPTHAI_PYTHON_PATH}/include
+            ${DEPTHAI_PYTHON_PATH}/../include
+            /usr/include
+      PATH_SUFFIXES depthai
+    )
+  endif()
+endif()
+
+# 如果上面没找到，尝试使用pkg-config
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+  pkg_check_modules(DEPTHAI_PC QUIET depthai-core)
+endif()
+
+# 备选方案：直接寻找库文件
+find_library(DEPTHAI_LIBRARY
+  NAMES depthai
+  PATHS /usr/lib /usr/local/lib
+)
+
+# 为hal_binocamera_node添加DepthAI支持
+if(DEPTHAI_INCLUDE_DIR AND DEPTHAI_LIBRARY)
+  target_include_directories(hal_binocamera_node PRIVATE ${DEPTHAI_INCLUDE_DIR})
+  target_link_libraries(hal_binocamera_node ${DEPTHAI_LIBRARY})
+elseif(EXISTS "${CMAKE_BINARY_DIR}/depthai-core/include")
+  target_include_directories(hal_binocamera_node PRIVATE ${CMAKE_BINARY_DIR}/depthai-core/include)
+  target_link_libraries(hal_binocamera_node depthai)
+else()
+  message(WARNING "Could not find DepthAI library, please install it or build from source")
+endif()
+
 ament_package()
