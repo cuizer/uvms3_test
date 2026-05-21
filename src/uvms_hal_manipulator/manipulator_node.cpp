@@ -201,7 +201,50 @@ bool ManipulatorLifecycleNode::init_can_driver()
         return false;
     }
     can_driver_.flush();
-    RCLCPP_INFO(get_logger(), "CAN driver initialized.");
+
+    // 开机发送电机启动指令 + 获取初始位置指令
+    RCLCPP_INFO(get_logger(), "Sending motor start upload command to all motors...");
+
+    // 双臂所有电机 ID
+    std::vector<uint32_t> motor_ids = {1,2,3,4,5,6,7,8,9,10};
+
+    // ==============================
+    // 第一步：发送 0x01 启动自动上传
+    // ==============================
+    for (uint32_t id : motor_ids) {
+        CanFrame frame;
+        frame.can_id = id;
+        frame.dlc = 5;
+        frame.data[0] = 0x01;  // 启动自动上传
+        frame.data[1] = 0x00;
+        frame.data[2] = 0x00;
+        frame.data[3] = 0x00;
+        frame.data[4] = 0x00;
+        can_driver_.write_frame(frame);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    // ==============================
+    // 第二步：发送指令 8 → 获取电机当前位置（你要的初始姿态校准！）
+    // ==============================
+    RCLCPP_INFO(get_logger(), "Sending GET POSITION (cmd=8) to all motors...");
+
+    for (uint32_t id : motor_ids) {
+        CanFrame frame;
+        frame.can_id = id;
+        frame.dlc = 5;
+        frame.data[0] = 0x08;  // <--- 指令 8：获取当前位置
+        frame.data[1] = 0x00;
+        frame.data[2] = 0x00;
+        frame.data[3] = 0x00;
+        frame.data[4] = 0x00;
+        can_driver_.write_frame(frame);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    RCLCPP_INFO(get_logger(), "All motor init commands sent.");
     return true;
 }
 
