@@ -154,7 +154,8 @@ endif()
 
 # 总是设置包含目录，因为头文件在固定位置
 target_include_directories(hal_binocamera_node PRIVATE 
-  /opt/ros/humble/include          # 这样 depthai/depthai.hpp 会在 include 目录下寻找
+  /opt/ros/humble/include
+  /opt/ros/humble/lib/x86_64-linux-gnu/cmake/depthai/dependencies/include
   /opt/ros/humble/include/depthai-shared
   /opt/ros/humble/include/depthai-bootloader-shared
 )
