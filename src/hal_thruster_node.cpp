@@ -23,8 +23,8 @@
 #include "std_msgs/msg/float64_multi_array.hpp" 
 #include "std_srvs/srv/set_bool.hpp" 
 
-#include "hal/msg/hal_mainthruster_msg.hpp"
-#include "hal/msg/hal_auxithruster_msg.hpp"
+#include "hal/msg/hal_mainthruster.hpp"
+#include "hal/msg/hal_auxithruster.hpp"
 #include "hal/srv/hal_thrustercontrol_srv.hpp"
 
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
@@ -39,8 +39,8 @@ public:
 
     CallbackReturn on_configure(const rclcpp_lifecycle::State &) override {
         RCLCPP_INFO(get_logger(), "配置中... 初始化推进器节点接口。");
-        pub_main_status_ = this->create_publisher<hal::msg::HalMainthrusterMsg>("hal_mainthruster_msg", 10);
-        pub_aux_status_ = this->create_publisher<hal::msg::HalAuxithrusterMsg>("hal_auxithruster_msg", 10);
+        pub_main_status_ = this->create_publisher<hal::msg::HalMainthruster>("hal_mainthruster_msg", 10);
+        pub_aux_status_ = this->create_publisher<hal::msg::HalAuxithruster>("hal_auxithruster_msg", 10);
 
         srv_control_ = this->create_service<hal::srv::HalThrustercontrolSrv>(
             "hal_thrustercontrol_srv", std::bind(&HalThrusterNode::control_srv_callback, this, _1, _2));
@@ -143,8 +143,8 @@ private:
     std::array<std::atomic<int64_t>, 6> last_seen_ms_{}; // 用于离线判定的系统时间戳
 
     // --- ROS2 接口指针 ---
-    std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalMainthrusterMsg>> pub_main_status_;
-    std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalAuxithrusterMsg>> pub_aux_status_;
+    std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalMainthruster>> pub_main_status_;
+    std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalAuxithruster>> pub_aux_status_;
     rclcpp::Service<hal::srv::HalThrustercontrolSrv>::SharedPtr srv_control_;
     rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr srv_estop_; 
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr sub_cmd_;
@@ -433,7 +433,8 @@ private:
 
     // --- 打包发布主推数据 ---
     void publish_main_thruster_status() {
-        hal::msg::HalMainthrusterMsg main_msg;
+        hal::msg::HalMainthruster main_msg;
+        main_msg.timestamp = this->get_clock()->now().nanoseconds();
         main_msg.rpm = real_main_rpm_.load();
         main_msg.current = static_cast<int16_t>(real_main_current_raw_.load() * 100); 
         main_msg.voltage = static_cast<int16_t>(real_main_voltage_.load());
@@ -444,8 +445,8 @@ private:
 
     // --- 组装并发布 6 路辅推状态与在线情况报告 ---
     void publish_aux_thrusters_status() {
-        hal::msg::HalAuxithrusterMsg aux_msg;
-        
+        hal::msg::HalAuxithruster aux_msg;
+        aux_msg.timestamp = this->get_clock()->now().nanoseconds();
         int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
 

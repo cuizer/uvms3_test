@@ -1,3 +1,4 @@
+int64 timestamp
 int16[6] rpm
 int16[6] current
 int16[6] voltage

@@ -18,9 +18,9 @@
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
 
-// 🚨 请确保你的 .msg 文件已更新包含 timestamp, position, turns 字段
-#include "hal/msg/hal_tailservo_msg.hpp"
-#include "hal/msg/hal_wingservo_msg.hpp"
+
+#include "hal/msg/hal_tailservo.hpp"
+#include "hal/msg/hal_wingservo.hpp"
 #include "hal/srv/hal_servocontrol_srv.hpp"
 
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
@@ -47,8 +47,8 @@ public:
             // ==========================================
             // 2. 初始化发布者 (Publisher不需要绑定回调组)
             // ==========================================
-            pub_tail_status_ = this->create_publisher<hal::msg::HalTailservoMsg>("/hal/tailservo", 10);
-            pub_wing_status_ = this->create_publisher<hal::msg::HalWingservoMsg>("/hal/wingservo", 10);
+            pub_tail_status_ = this->create_publisher<hal::msg::HalTailservo>("/hal/tailservo", 10);
+            pub_wing_status_ = this->create_publisher<hal::msg::HalWingservo>("/hal/wingservo", 10);
         
             // ==========================================
             // 3. 初始化服务 (Service)
@@ -145,12 +145,12 @@ private:
 
     // 数据缓存池
     std::mutex data_cache_mutex_;
-    hal::msg::HalTailservoMsg cached_tail_msg_;
-    hal::msg::HalWingservoMsg cached_wing_msg_;
+    hal::msg::HalTailservo cached_tail_msg_;
+    hal::msg::HalWingservo cached_wing_msg_;
 
     // ROS 2 接口
-    std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalTailservoMsg>> pub_tail_status_;
-    std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalWingservoMsg>> pub_wing_status_;
+    std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalTailservo>> pub_tail_status_;
+    std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalWingservo>> pub_wing_status_;
     std::shared_ptr<rclcpp::Service<hal::srv::HalServocontrolSrv>> srv_control_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr sub_tail_cmd_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr sub_wing_cmd_;
@@ -298,7 +298,7 @@ private:
     
         if (msg->data.size() >= 4) {
             for (int i=0; i<4; ++i) {
-                send_angle_command(i, std::clamp(msg->data[i], -max_angle_, max_angle_));
+                send_angle_command(i, std::max(-max_angle_, std::min(msg->data[i], max_angle_)));
             }
         }
     }
@@ -308,8 +308,8 @@ private:
         if (this->get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE || is_testing_) return;
         
         if (msg->data.size() >= 2) {
-            // �� 修正：机翼 ID 是 4 和 5
-            for (int i=0; i<2; ++i) send_angle_command(i + 4, std::clamp(msg->data[i], -max_angle_, max_angle_));
+            // 修正：机翼 ID 是 4 和 5
+            for (int i=0; i<2; ++i) send_angle_command(i + 4, std::max(-max_angle_, std::min(msg->data[i], max_angle_)));
         }
     }
 
