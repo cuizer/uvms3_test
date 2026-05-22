@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <hal/msg/halbinocamera_msg.hpp>
 #include <hal/srv/halbinocamera_srv.hpp>
@@ -33,10 +34,8 @@ protected:
   CallbackReturn on_shutdown(const rclcpp_lifecycle::State & state) override;
   CallbackReturn on_error(const rclcpp_lifecycle::State & state) override;
 
-
 private:
   void declareParameters();
-  dai::Pipeline createPipeline();
   bool openCamera();
   void closeCamera();
   void captureAndPublish();
@@ -44,15 +43,17 @@ private:
   void handleToggleCamera(
     const std::shared_ptr<hal::srv::HalbinocameraSrv::Request> request,
     std::shared_ptr<hal::srv::HalbinocameraSrv::Response> response);
-  void publishColorImage(const std::shared_ptr<dai::ImgFrame> & color_frame);
-  void publishDepthImage(const std::shared_ptr<dai::ImgFrame> & depth_frame);
+  void publishColorImage(
+    const std::vector<std::uint8_t> & image_data,
+    int width,
+    int height,
+    int stride);
+  void publishDepthImage(
+    const std::vector<std::uint16_t> & depth_data,
+    int width,
+    int height,
+    int stride);
 
-  dai::ColorCameraProperties::SensorResolution parseColorResolution(
-    const std::string & value) const;
-  dai::MonoCameraProperties::SensorResolution parseMonoResolution(
-    const std::string & value) const;
-
-    // Pimpl模式隐藏depthai实现细节
   struct Impl;
   std::unique_ptr<Impl> pimpl_;
 

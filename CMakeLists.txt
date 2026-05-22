@@ -146,45 +146,25 @@ ament_export_dependencies(
 )
 
 # 为hal_binocamera_node添加depthai库支持 - 使用ROS2 Humble中安装的库
-find_package(PkgConfig REQUIRED)
-if(PKG_CONFIG_FOUND)
-  # 尝试查找depthai库
-  pkg_check_modules(DEPTHAI_PKG QUIET depthai)
-endif()
-
-# 总是设置包含目录，因为头文件在固定位置
+# 设置包含目录
 target_include_directories(hal_binocamera_node PRIVATE 
   /opt/ros/humble/include
+  /usr/include/opencv4
   /opt/ros/humble/lib/x86_64-linux-gnu/cmake/depthai/dependencies/include
-  /opt/ros/humble/include/depthai-shared
-  /opt/ros/humble/include/depthai-bootloader-shared
+  /opt/ros/humble/include/depthai-shared/3rdparty
 )
 
-if(DEPTHAI_PKG_FOUND)
-  target_link_libraries(hal_binocamera_node ${DEPTHAI_PKG_LIBRARIES})
+# 查找并链接depthai库
+find_library(DEPTHAI_CORE_LIBRARY
+  NAMES depthai-core
+  PATHS /opt/ros/humble/lib/x86_64-linux-gnu
+  NO_DEFAULT_PATH
+)
+
+if(DEPTHAI_CORE_LIBRARY)
+  target_link_libraries(hal_binocamera_node ${DEPTHAI_CORE_LIBRARY})
 else()
-  
-  # 查找depthai-core库文件（在x86_64-linux-gnu子目录中）
-  find_library(DEPTHAI_CORE_LIBRARY
-    NAMES depthai-core
-    PATHS /opt/ros/humble/lib/x86_64-linux-gnu
-    NO_DEFAULT_PATH
-  )
-  
-  if(DEPTHAI_CORE_LIBRARY)
-    target_link_libraries(hal_binocamera_node ${DEPTHAI_CORE_LIBRARY})
-  else()
-    # 再次尝试在标准lib目录中查找
-    find_library(DEPTHAI_CORE_LIBRARY_ALT
-      NAMES depthai-core
-      PATHS /opt/ros/humble/lib
-    )
-    if(DEPTHAI_CORE_LIBRARY_ALT)
-      target_link_libraries(hal_binocamera_node ${DEPTHAI_CORE_LIBRARY_ALT})
-    else()
-      message(FATAL_ERROR "Could not find depthai-core library in /opt/ros/humble/lib or /opt/ros/humble/lib/x86_64-linux-gnu")
-    endif()
-  endif()
+  message(FATAL_ERROR "Could not find depthai-core library in /opt/ros/humble/lib/x86_64-linux-gnu")
 endif()
 
 ament_package()

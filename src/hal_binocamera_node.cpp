@@ -2,17 +2,24 @@
 
 #include <chrono>
 #include <cstring>
+#include <depthai/depthai.hpp>
 #include <exception>
 #include <functional>
-#include <depthai/depthai.hpp>
+#include <memory>
+#include <vector>
+
+#include <rclcpp/executors/single_threaded_executor.hpp>
 
 namespace hal_binocamera
 {
-struct HalBinocameraNode::Impl {
+
+struct HalBinocameraNode::Impl
+{
   std::unique_ptr<dai::Device> device_;
   std::shared_ptr<dai::DataOutputQueue> color_queue_;
-  std::shared_ptr<dai::DataOutputQueue> depth_queue_;}
-  
+  std::shared_ptr<dai::DataOutputQueue> depth_queue_;
+};
+
 namespace
 {
 
@@ -29,10 +36,10 @@ constexpr int kMaxGrabFailCount = 5;
 
 HalBinocameraNode::HalBinocameraNode()
 : rclcpp_lifecycle::LifecycleNode("hal_binocamera_node"),
+  pimpl_(std::make_unique<Impl>()),
   grab_fail_count_(0),
   is_camera_open_(false),
-  camera_enabled_(true),
-  pimpl_(std::make_unique<Impl>())  // 添加这行
+  camera_enabled_(true)
 {
   declareParameters();
 }
@@ -67,6 +74,7 @@ CallbackReturn HalBinocameraNode::on_configure(const rclcpp_lifecycle::State &)
     kDepthImageTopic, rclcpp::SensorDataQoS());
   status_pub_ = this->create_publisher<hal::msg::HalbinocameraMsg>(
     kCameraStatusTopic, rclcpp::SystemDefaultsQoS());
+
   toggle_camera_service_ =
     this->create_service<hal::srv::HalbinocameraSrv>(
     "~/toggle_camera",
@@ -156,64 +164,93 @@ CallbackReturn HalBinocameraNode::on_error(const rclcpp_lifecycle::State &)
   return CallbackReturn::SUCCESS;
 }
 
-dai::Pipeline HalBinocameraNode::createPipeline()
-{
-  dai::Pipeline pipeline;
-
-  auto color_camera = pipeline.create<dai::node::ColorCamera>();
-  auto mono_left = pipeline.create<dai::node::MonoCamera>();
-  auto mono_right = pipeline.create<dai::node::MonoCamera>();
-  auto stereo = pipeline.create<dai::node::StereoDepth>();
-  auto color_xout = pipeline.create<dai::node::XLinkOut>();
-  auto depth_xout = pipeline.create<dai::node::XLinkOut>();
-
-  color_xout->setStreamName(kColorStreamName);
-  depth_xout->setStreamName(kDepthStreamName);
-
-  const auto color_width = this->get_parameter("color_width").as_int();
-  const auto color_height = this->get_parameter("color_height").as_int();
-  const auto camera_fps = static_cast<float>(this->get_parameter("camera_fps").as_double());
-
-  color_camera->setBoardSocket(dai::CameraBoardSocket::RGB);
-  color_camera->setResolution(
-    parseColorResolution(this->get_parameter("color_resolution").as_string()));
-  color_camera->setPreviewSize(color_width, color_height);
-  color_camera->setFps(camera_fps);
-  color_camera->setInterleaved(false);
-  color_camera->setColorOrder(dai::ColorCameraProperties::ColorOrder::BGR);
-
-  mono_left->setBoardSocket(dai::CameraBoardSocket::LEFT);
-  mono_right->setBoardSocket(dai::CameraBoardSocket::RIGHT);
-  mono_left->setResolution(
-    parseMonoResolution(this->get_parameter("mono_resolution").as_string()));
-  mono_right->setResolution(
-    parseMonoResolution(this->get_parameter("mono_resolution").as_string()));
-  mono_left->setFps(camera_fps);
-  mono_right->setFps(camera_fps);
-
-  stereo->initialConfig.setConfidenceThreshold(
-    this->get_parameter("stereo_confidence_threshold").as_int());
-  stereo->setLeftRightCheck(this->get_parameter("stereo_left_right_check").as_bool());
-  stereo->setExtendedDisparity(
-    this->get_parameter("stereo_extended_disparity").as_bool());
-  stereo->setSubpixel(this->get_parameter("stereo_subpixel").as_bool());
-  stereo->setDepthAlign(dai::CameraBoardSocket::RGB);
-  stereo->setOutputSize(color_width, color_height);
-
-  color_camera->preview.link(color_xout->input);
-  mono_left->out.link(stereo->left);
-  mono_right->out.link(stereo->right);
-  stereo->depth.link(depth_xout->input);
-
-  return pipeline;
-}
-
 bool HalBinocameraNode::openCamera()
 {
   closeCamera();
 
   try {
-    auto pipeline = createPipeline();
+    dai::Pipeline pipeline;
+
+    auto color_camera = pipeline.create<dai::node::ColorCamera>();
+    auto mono_left = pipeline.create<dai::node::MonoCamera>();
+    auto mono_right = pipeline.create<dai::node::MonoCamera>();
+    auto stereo = pipeline.create<dai::node::StereoDepth>();
+    auto color_xout = pipeline.create<dai::node::XLinkOut>();
+    auto depth_xout = pipeline.create<dai::node::XLinkOut>();
+
+    color_xout->setStreamName(kColorStreamName);
+    depth_xout->setStreamName(kDepthStreamName);
+
+    const auto color_width = this->get_parameter("color_width").as_int();
+    const auto color_height = this->get_parameter("color_height").as_int();
+    const auto camera_fps = static_cast<float>(this->get_parameter("camera_fps").as_double());
+
+    color_camera->setBoardSocket(dai::CameraBoardSocket::CAM_A);
+
+    const auto color_resolution_str = this->get_parameter("color_resolution").as_string();
+    dai::ColorCameraProperties::SensorResolution color_resolution;
+    if (color_resolution_str == "THE_4_K") {
+      color_resolution = dai::ColorCameraProperties::SensorResolution::THE_4_K;
+    } else if (color_resolution_str == "THE_12_MP") {
+      color_resolution = dai::ColorCameraProperties::SensorResolution::THE_12_MP;
+    } else if (color_resolution_str == "THE_13_MP") {
+      color_resolution = dai::ColorCameraProperties::SensorResolution::THE_13_MP;
+    } else {
+      if (color_resolution_str != "THE_1080_P") {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "Unsupported color_resolution '%s', defaulting to THE_1080_P.",
+          color_resolution_str.c_str());
+      }
+      color_resolution = dai::ColorCameraProperties::SensorResolution::THE_1080_P;
+    }
+    color_camera->setResolution(color_resolution);
+
+    color_camera->setPreviewSize(color_width, color_height);
+    color_camera->setFps(camera_fps);
+    color_camera->setInterleaved(false);
+    color_camera->setColorOrder(dai::ColorCameraProperties::ColorOrder::BGR);
+
+    mono_left->setBoardSocket(dai::CameraBoardSocket::CAM_B);
+    mono_right->setBoardSocket(dai::CameraBoardSocket::CAM_C);
+
+    const auto mono_resolution_str = this->get_parameter("mono_resolution").as_string();
+    dai::MonoCameraProperties::SensorResolution mono_resolution;
+    if (mono_resolution_str == "THE_400_P") {
+      mono_resolution = dai::MonoCameraProperties::SensorResolution::THE_400_P;
+    } else if (mono_resolution_str == "THE_480_P") {
+      mono_resolution = dai::MonoCameraProperties::SensorResolution::THE_480_P;
+    } else if (mono_resolution_str == "THE_800_P") {
+      mono_resolution = dai::MonoCameraProperties::SensorResolution::THE_800_P;
+    } else {
+      if (mono_resolution_str != "THE_720_P") {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "Unsupported mono_resolution '%s', defaulting to THE_720_P.",
+          mono_resolution_str.c_str());
+      }
+      mono_resolution = dai::MonoCameraProperties::SensorResolution::THE_720_P;
+    }
+    mono_left->setResolution(mono_resolution);
+    mono_right->setResolution(mono_resolution);
+
+    mono_left->setFps(camera_fps);
+    mono_right->setFps(camera_fps);
+
+    stereo->initialConfig.setConfidenceThreshold(
+      this->get_parameter("stereo_confidence_threshold").as_int());
+    stereo->setLeftRightCheck(this->get_parameter("stereo_left_right_check").as_bool());
+    stereo->setExtendedDisparity(
+      this->get_parameter("stereo_extended_disparity").as_bool());
+    stereo->setSubpixel(this->get_parameter("stereo_subpixel").as_bool());
+    stereo->setDepthAlign(dai::CameraBoardSocket::CAM_A);
+    stereo->setOutputSize(color_width, color_height);
+
+    color_camera->preview.link(color_xout->input);
+    mono_left->out.link(stereo->left);
+    mono_right->out.link(stereo->right);
+    stereo->depth.link(depth_xout->input);
+
     const auto mx_id = this->get_parameter("device_mx_id").as_string();
 
     if (mx_id.empty()) {
@@ -241,6 +278,10 @@ bool HalBinocameraNode::openCamera()
 
 void HalBinocameraNode::closeCamera()
 {
+  if (!pimpl_) {
+    return;
+  }
+
   pimpl_->depth_queue_.reset();
   pimpl_->color_queue_.reset();
   pimpl_->device_.reset();
@@ -275,8 +316,10 @@ void HalBinocameraNode::captureAndPublish()
   }
 
   try {
-    auto color_frame = pimpl_->color_queue_ ? pimpl_->color_queue_->tryGet<dai::ImgFrame>() : nullptr;
-    auto depth_frame = pimpl_->depth_queue_ ? pimpl_->depth_queue_->tryGet<dai::ImgFrame>() : nullptr;
+    auto color_frame =
+      pimpl_->color_queue_ ? pimpl_->color_queue_->tryGet<dai::ImgFrame>() : nullptr;
+    auto depth_frame =
+      pimpl_->depth_queue_ ? pimpl_->depth_queue_->tryGet<dai::ImgFrame>() : nullptr;
 
     if (!color_frame && !depth_frame) {
       publishStatus(kCameraStatusFault);
@@ -302,10 +345,35 @@ void HalBinocameraNode::captureAndPublish()
     publishStatus(kCameraStatusOk);
 
     if (color_frame) {
-      publishColorImage(color_frame);
+      const auto width = static_cast<int>(color_frame->getWidth());
+      const auto height = static_cast<int>(color_frame->getHeight());
+      const auto expected_step = width * 3;
+      const auto expected_bytes = static_cast<std::size_t>(expected_step) * height;
+      const auto & raw = color_frame->getData();
+
+      if (width > 0 && height > 0 && raw.size() >= expected_bytes) {
+        std::vector<std::uint8_t> image_data(raw.begin(), raw.end());
+        publishColorImage(image_data, width, height, expected_step);
+      }
     }
+
     if (depth_frame) {
-      publishDepthImage(depth_frame);
+      const auto width = static_cast<int>(depth_frame->getWidth());
+      const auto height = static_cast<int>(depth_frame->getHeight());
+      const auto expected_step = width * static_cast<int>(sizeof(std::uint16_t));
+      const auto expected_bytes = static_cast<std::size_t>(expected_step) * height;
+      const auto & raw = depth_frame->getData();
+
+      if (width > 0 && height > 0 && raw.size() >= expected_bytes) {
+        std::vector<std::uint16_t> depth_data;
+        depth_data.reserve(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+        for (std::size_t i = 0; i + sizeof(std::uint16_t) <= raw.size(); i += sizeof(std::uint16_t)) {
+          std::uint16_t pixel_value;
+          std::memcpy(&pixel_value, &raw[i], sizeof(std::uint16_t));
+          depth_data.push_back(pixel_value);
+        }
+        publishDepthImage(depth_data, width, height, expected_step);
+      }
     }
   } catch (const std::exception & exception) {
     publishStatus(kCameraStatusFault);
@@ -348,17 +416,13 @@ void HalBinocameraNode::handleToggleCamera(
   RCLCPP_INFO(this->get_logger(), "Camera capture and publishing disabled.");
 }
 
-void HalBinocameraNode::publishColorImage(const std::shared_ptr<dai::ImgFrame> & color_frame)
+void HalBinocameraNode::publishColorImage(
+  const std::vector<std::uint8_t> & image_data,
+  int width,
+  int height,
+  int stride)
 {
-  if (!color_frame) {
-    return;
-  }
-  const auto width = static_cast<std::uint32_t>(color_frame->getWidth());
-  const auto height = static_cast<std::uint32_t>(color_frame->getHeight());
-  const auto expected_step = width * 3U;
-  const auto expected_bytes = static_cast<std::size_t>(expected_step) * height;
-  const auto & raw = color_frame->getData();
-  if (width == 0U || height == 0U || raw.size() < expected_bytes) {
+  if (image_data.empty() || width <= 0 || height <= 0) {
     return;
   }
 
@@ -369,24 +433,20 @@ void HalBinocameraNode::publishColorImage(const std::shared_ptr<dai::ImgFrame> &
   message.width = width;
   message.encoding = "bgr8";
   message.is_bigendian = false;
-  message.step = static_cast<sensor_msgs::msg::Image::_step_type>(expected_step);
-  message.data.resize(expected_bytes);
-  std::memcpy(message.data.data(), raw.data(), expected_bytes);
+  message.step = static_cast<sensor_msgs::msg::Image::_step_type>(stride);
+  message.data.resize(image_data.size());
+  std::memcpy(message.data.data(), image_data.data(), image_data.size());
 
   left_pub_->publish(message);
 }
 
-void HalBinocameraNode::publishDepthImage(const std::shared_ptr<dai::ImgFrame> & depth_frame)
+void HalBinocameraNode::publishDepthImage(
+  const std::vector<std::uint16_t> & depth_data,
+  int width,
+  int height,
+  int stride)
 {
-  if (!depth_frame) {
-    return;
-  }
-  const auto width = static_cast<std::uint32_t>(depth_frame->getWidth());
-  const auto height = static_cast<std::uint32_t>(depth_frame->getHeight());
-  const auto expected_step = width * static_cast<std::uint32_t>(sizeof(std::uint16_t));
-  const auto expected_bytes = static_cast<std::size_t>(expected_step) * height;
-  const auto & raw = depth_frame->getData();
-  if (width == 0U || height == 0U || raw.size() < expected_bytes) {
+  if (depth_data.empty() || width <= 0 || height <= 0) {
     return;
   }
 
@@ -397,53 +457,11 @@ void HalBinocameraNode::publishDepthImage(const std::shared_ptr<dai::ImgFrame> &
   message.width = width;
   message.encoding = "16UC1";
   message.is_bigendian = false;
-  message.step = static_cast<sensor_msgs::msg::Image::_step_type>(expected_step);
-  message.data.resize(expected_bytes);
-  std::memcpy(message.data.data(), raw.data(), expected_bytes);
+  message.step = static_cast<sensor_msgs::msg::Image::_step_type>(stride);
+  message.data.resize(depth_data.size() * sizeof(std::uint16_t));
+  std::memcpy(message.data.data(), depth_data.data(), depth_data.size() * sizeof(std::uint16_t));
 
   depth_pub_->publish(message);
-}
-
-dai::ColorCameraProperties::SensorResolution HalBinocameraNode::parseColorResolution(
-  const std::string & value) const
-{
-  if (value == "THE_4_K") {
-    return dai::ColorCameraProperties::SensorResolution::THE_4_K;
-  }
-  if (value == "THE_12_MP") {
-    return dai::ColorCameraProperties::SensorResolution::THE_12_MP;
-  }
-  if (value == "THE_13_MP") {
-    return dai::ColorCameraProperties::SensorResolution::THE_13_MP;
-  }
-  if (value != "THE_1080_P") {
-    RCLCPP_WARN(
-      this->get_logger(),
-      "Unsupported color_resolution '%s', defaulting to THE_1080_P.",
-      value.c_str());
-  }
-  return dai::ColorCameraProperties::SensorResolution::THE_1080_P;
-}
-
-dai::MonoCameraProperties::SensorResolution HalBinocameraNode::parseMonoResolution(
-  const std::string & value) const
-{
-  if (value == "THE_400_P") {
-    return dai::MonoCameraProperties::SensorResolution::THE_400_P;
-  }
-  if (value == "THE_480_P") {
-    return dai::MonoCameraProperties::SensorResolution::THE_480_P;
-  }
-  if (value == "THE_800_P") {
-    return dai::MonoCameraProperties::SensorResolution::THE_800_P;
-  }
-  if (value != "THE_720_P") {
-    RCLCPP_WARN(
-      this->get_logger(),
-      "Unsupported mono_resolution '%s', defaulting to THE_720_P.",
-      value.c_str());
-  }
-  return dai::MonoCameraProperties::SensorResolution::THE_720_P;
 }
 
 }  // namespace hal_binocamera
