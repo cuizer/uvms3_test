@@ -19,6 +19,10 @@ find_package(trajectory_msgs REQUIRED)
 find_package(lifecycle_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(builtin_interfaces REQUIRED)
+find_package(depthai CONFIG REQUIRED
+  PATHS /home/nvidia/depthai-core/build/install/lib/cmake/depthai
+  NO_DEFAULT_PATH
+)
 
 include_directories(include)
 
@@ -37,13 +41,13 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/HalAntenna.msg"
   "msg/CanMsgIn.msg"
   "msg/CanMsgOut.msg"
-  "msg/HalbinocameraMsg.msg" 
-  "srv/HalbinocameraSrv.srv" 
+  "msg/HalbinocameraMsg.msg"
+  "srv/HalbinocameraSrv.srv"
   DEPENDENCIES std_msgs builtin_interfaces
 )
 
 # ==============================================================================
-# �� 直接把所有源码合成一个节点！彻底消灭库错误！
+# 直接把所有源码合成一个节点！彻底消灭库错误！
 # ==============================================================================
 add_executable(manipulator_driver
   src/uvms_hal_manipulator/manipulator_node.cpp
@@ -97,8 +101,16 @@ ament_target_dependencies(hal_dvl_node rclcpp rclcpp_lifecycle std_msgs)
 add_executable(hal_inertialnavi_node src/hal_inertialnavi_node.cpp)
 ament_target_dependencies(hal_inertialnavi_node rclcpp rclcpp_lifecycle std_msgs)
 
-add_executable(hal_binocamera_node src/hal_binocamera_node.cpp) 
-ament_target_dependencies(hal_binocamera_node rclcpp rclcpp_lifecycle std_msgs sensor_msgs geometry_msgs std_srvs)
+add_executable(hal_binocamera_node src/hal_binocamera_node.cpp)
+ament_target_dependencies(hal_binocamera_node
+  rclcpp
+  rclcpp_lifecycle
+  std_msgs
+  sensor_msgs
+  geometry_msgs
+  std_srvs
+)
+target_link_libraries(hal_binocamera_node depthai::core)
 
 add_executable(bsp_comm_node src/bsp_comm_node.cpp)
 ament_target_dependencies(bsp_comm_node rclcpp rclcpp_lifecycle std_msgs)
@@ -144,27 +156,5 @@ ament_export_dependencies(
   std_srvs
   trajectory_msgs
 )
-
-# 为hal_binocamera_node添加depthai库支持 - 使用ROS2 Humble中安装的库
-# 设置包含目录
-target_include_directories(hal_binocamera_node PRIVATE 
-  /opt/ros/humble/include
-  /usr/include/opencv4
-  /opt/ros/humble/lib/x86_64-linux-gnu/cmake/depthai/dependencies/include
-  /opt/ros/humble/include/depthai-shared/3rdparty
-)
-
-# 查找并链接depthai库
-find_library(DEPTHAI_CORE_LIBRARY
-  NAMES depthai-core
-  PATHS /opt/ros/humble/lib/x86_64-linux-gnu
-  NO_DEFAULT_PATH
-)
-
-if(DEPTHAI_CORE_LIBRARY)
-  target_link_libraries(hal_binocamera_node ${DEPTHAI_CORE_LIBRARY})
-else()
-  message(FATAL_ERROR "Could not find depthai-core library in /opt/ros/humble/lib/x86_64-linux-gnu")
-endif()
 
 ament_package()
