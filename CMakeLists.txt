@@ -23,10 +23,10 @@ find_package(builtin_interfaces REQUIRED)
 include_directories(include)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/HalTailservoMsg.msg"
-  "msg/HalWingservoMsg.msg"
-  "msg/HalMainthrusterMsg.msg"
-  "msg/HalAuxithrusterMsg.msg"
+  "msg/HalTailservo.msg"
+  "msg/HalWingservo.msg"
+  "msg/HalMainthruster.msg"
+  "msg/HalAuxithruster.msg"
   "srv/HalServocontrolSrv.srv"
   "srv/HalThrustercontrolSrv.srv"
   "msg/HalBattery.msg"
