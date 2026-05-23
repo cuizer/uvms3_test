@@ -1,5 +1,12 @@
 #include "uvms_hal_manipulator/manipulator_node.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
+
+// =============================
+// 新增：上位机接口头文件
+// =============================
+#include "uvms_hal_manipulator/msg/hal_armmotor.hpp"
+#include "uvms_hal_manipulator/srv/hal_armmotor_cmd.hpp"
+
 #include <rclcpp/executors/single_threaded_executor.hpp>
 #include <algorithm>
 #include <chrono>
@@ -68,6 +75,20 @@ auto ManipulatorLifecycleNode::on_configure(const rclcpp_lifecycle::State&) -> C
     fault_pub_ = create_publisher<std_msgs::msg::Bool>(
         "hal/manipulator/fault", rclcpp::QoS(10));
 
+    // ==============================
+    // 新增：上位机状态发布
+    // ==============================
+    armmotor_state_pub_ = create_publisher<uvms_hal_manipulator::msg::HalArmmotor>(
+        "/hal/armmotor", rclcpp::QoS(10));
+
+    // ==============================
+    // 新增：上位机指令服务
+    // ==============================
+    armmotor_cmd_srv_ = create_service<uvms_hal_manipulator::srv/HalArmMotorCmd>(
+        "/hal/armmotor_cmd",
+        std::bind(&ManipulatorLifecycleNode::armmotor_cmd_callback, this,
+            std::placeholders::_1, std::placeholders::_2));
+
     auto period_ms = std::chrono::milliseconds(static_cast<int>(1000.0 / std::max(1.0, publish_rate_hz_)));
     timer_ = create_wall_timer(period_ms, std::bind(&ManipulatorLifecycleNode::timer_callback, this));
 
@@ -84,6 +105,9 @@ auto ManipulatorLifecycleNode::on_activate(const rclcpp_lifecycle::State&) -> Ca
     status_pub_->on_activate();
     fault_pub_->on_activate();
 
+    // 新增：激活上位机发布
+    if (armmotor_state_pub_) armmotor_state_pub_->on_activate();
+
     control_enabled_ = true;
     publish_status("Manipulator HAL node activated.");
     return CallbackReturn::SUCCESS;
@@ -98,6 +122,8 @@ auto ManipulatorLifecycleNode::on_deactivate(const rclcpp_lifecycle::State&) -> 
     if (status_pub_) status_pub_->on_deactivate();
     if (fault_pub_) fault_pub_->on_deactivate();
 
+    if (armmotor_state_pub_) armmotor_state_pub_->on_deactivate();
+
     control_enabled_ = false;
     return CallbackReturn::SUCCESS;
 }
@@ -109,11 +135,13 @@ auto ManipulatorLifecycleNode::on_cleanup(const rclcpp_lifecycle::State&) -> Cal
     timer_.reset();
     joint_cmd_sub_.reset();
     emergency_stop_srv_.reset();
+    armmotor_cmd_srv_.reset();
 
     joint_state_pub_.reset();
     ee_pose_pub_.reset();
     status_pub_.reset();
     fault_pub_.reset();
+    armmotor_state_pub_.reset();
 
     can_driver_.close();
     reset_runtime_state();
@@ -202,20 +230,14 @@ bool ManipulatorLifecycleNode::init_can_driver()
     }
     can_driver_.flush();
 
-    // 开机发送电机启动指令 + 获取初始位置指令
     RCLCPP_INFO(get_logger(), "Sending motor start upload command to all motors...");
-
-    // 双臂所有电机 ID
     std::vector<uint32_t> motor_ids = {1,2,3,4,5,6,7,8,9,10};
 
-    // ==============================
-    // 第一步：发送 0x01 启动自动上传
-    // ==============================
     for (uint32_t id : motor_ids) {
         CanFrame frame;
         frame.can_id = id;
         frame.dlc = 5;
-        frame.data[0] = 0x01;  // 启动自动上传
+        frame.data[0] = 0x01;
         frame.data[1] = 0x00;
         frame.data[2] = 0x00;
         frame.data[3] = 0x00;
@@ -226,16 +248,13 @@ bool ManipulatorLifecycleNode::init_can_driver()
 
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
-    // ==============================
-    // 第二步：发送指令 8 → 获取电机当前位置（你要的初始姿态校准！）
-    // ==============================
     RCLCPP_INFO(get_logger(), "Sending GET POSITION (cmd=8) to all motors...");
 
     for (uint32_t id : motor_ids) {
         CanFrame frame;
         frame.can_id = id;
         frame.dlc = 5;
-        frame.data[0] = 0x08;  // <--- 指令 8：获取当前位置
+        frame.data[0] = 0x08;
         frame.data[1] = 0x00;
         frame.data[2] = 0x00;
         frame.data[3] = 0x00;
@@ -260,6 +279,9 @@ void ManipulatorLifecycleNode::reset_runtime_state()
     control_enabled_ = false;
     communication_lost_latched_ = false;
     fault_stop_requested_ = false;
+
+    // 新增：数据上传默认开启
+    data_upload_enabled_ = true;
 
     build_expected_motor_id_list();
 }
@@ -319,13 +341,54 @@ void ManipulatorLifecycleNode::emergency_stop_callback(
     res->message = "OK";
 }
 
+// ==============================
+// 新增：上位机指令解析回调
+// ==============================
+void ManipulatorLifecycleNode::armmotor_cmd_callback(
+    const std::shared_ptr<uvms_hal_manipulator::srv/HalArmMotorCmd::Request> req,
+    std::shared_ptr<uvms_hal_manipulator::srv/HalArmMotorCmd::Response> res)
+{
+    uint8_t cmd = req->cmd;
+    res->success = true;
+
+    switch (cmd) {
+        case 0x01:
+            RCLCPP_INFO(get_logger(), "[上位机] 机械臂舱开启");
+            res->message = "cabin open";
+            break;
+        case 0x02:
+            RCLCPP_INFO(get_logger(), "[上位机] 机械臂舱关闭");
+            res->message = "cabin close";
+            break;
+        case 0x03:
+            RCLCPP_INFO(get_logger(), "[上位机] 机械臂伸出");
+            res->message = "arm extend";
+            break;
+        case 0x04:
+            RCLCPP_INFO(get_logger(), "[上位机] 机械臂回收");
+            res->message = "arm retract";
+            break;
+        case 0x05:
+            data_upload_enabled_ = true;
+            RCLCPP_INFO(get_logger(), "[上位机] 数据上传开启");
+            res->message = "data upload on";
+            break;
+        case 0x06:
+            data_upload_enabled_ = false;
+            RCLCPP_INFO(get_logger(), "[上位机] 数据上传关闭");
+            res->message = "data upload off";
+            break;
+        default:
+            res->success = false;
+            res->message = "unknown cmd";
+            break;
+    }
+}
+
 void ManipulatorLifecycleNode::timer_callback()
 {
     if (this->get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) return;
 
-    // ------------------------------
-    // 1. 读取电机反馈（保留）
-    // ------------------------------
     for (uint32_t id : expected_motor_ids_) {
         CanFrame req;
         req.can_id = id;
@@ -354,32 +417,41 @@ void ManipulatorLifecycleNode::timer_callback()
         initial_pose_complete_ = true;
     }
 
-    // ==========================================================
-    // ������ 【核心：这里才是真正发指令让电机转动的代码】
-    // ==========================================================
     if (control_enabled_ && communication_ok_ && !latest_joint_position_.empty())
     {
-        // 取出你发的位置：[1.0]
         double target_rad = latest_joint_position_[0];
-
-        // 转成电机能用的角度
         double target_deg = target_rad * 180.0 / M_PI;
-
-        // 电机协议公式
         const double reduction_ratio = 101.0;
         int32_t send_val = (target_deg / 360.0) * reduction_ratio * 65536.0;
 
-        // 发送真正的电机转动指令：0x1E
         CanFrame tx_frame;
         tx_frame.can_id = 1;
         tx_frame.dlc = 5;
-        tx_frame.data[0] = 0x1E;   // 位置控制指令
+        tx_frame.data[0] = 0x1E;
         tx_frame.data[1] = send_val & 0xFF;
         tx_frame.data[2] = (send_val >> 8) & 0xFF;
         tx_frame.data[3] = (send_val >> 16) & 0xFF;
         tx_frame.data[4] = (send_val >> 24) & 0xFF;
 
         can_driver_.write_frame(tx_frame);
+    }
+
+    // ==============================
+    // 新增：向上位机发布状态
+    // ==============================
+    if (data_upload_enabled_ && armmotor_state_pub_) {
+        auto msg = uvms_hal_manipulator::msg::HalArmmotor();
+        msg.timestamp = this->now().nanoseconds() / 1000000;
+
+        for (int i = 0; i < 10; i++) {
+            msg.motor_current.push_back(0);
+            msg.motor_speed.push_back(0);
+            msg.motor_position.push_back(0);
+            msg.motor_temp.push_back(0);
+            msg.motor_error.push_back(0);
+        }
+
+        armmotor_state_pub_->publish(msg);
     }
 
     publish_joint_states();
@@ -390,7 +462,6 @@ bool ManipulatorLifecycleNode::process_rx_frame(const CanFrame& frame)
 {
     if (!is_my_motor_id(frame.can_id)) return false;
 
-    // 关键修正：识别正常位置回复（第一个字节是 0x08）
     if (frame.dlc == 5 && frame.data[0] == 0x08)
     {
         int32_t raw = 0;
