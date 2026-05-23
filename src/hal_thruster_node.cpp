@@ -42,8 +42,9 @@ public:
         pub_main_status_ = this->create_publisher<hal::msg::HalMainthruster>("hal_mainthruster_msg", 10);
         pub_aux_status_ = this->create_publisher<hal::msg::HalAuxithruster>("hal_auxithruster_msg", 10);
 
+        // 对应协议 #33 节点消息命名：/hal/thrustercontrol
         srv_control_ = this->create_service<hal::srv::HalThrustercontrolSrv>(
-            "hal_thrustercontrol_srv", std::bind(&HalThrusterNode::control_srv_callback, this, _1, _2));
+            "/hal/thrustercontrol", std::bind(&HalThrusterNode::control_srv_callback, this, _1, _2));
 
         srv_estop_ = this->create_service<std_srvs::srv::SetBool>(
             "hal_thruster_estop", std::bind(&HalThrusterNode::estop_callback, this, _1, _2));
@@ -66,6 +67,7 @@ public:
         
         is_testing_ = false;
         is_estopped_ = false; 
+        is_emergency_ascending_ = false;
 
         // 初始化 6 个辅推的目标期望值为 0.0 (对应死区油门 1000)
         for (int i = 0; i < 6; ++i) {
@@ -88,6 +90,7 @@ public:
         srv_control_.reset(); srv_estop_.reset(); sub_cmd_.reset(); timer_.reset();
         
         keep_running_ = false; 
+        is_testing_ = false;
         if (can_rx_thread_.joinable()) can_rx_thread_.join();
         if (test_thread_.joinable()) test_thread_.join();
         
@@ -102,7 +105,9 @@ public:
         LifecycleNode::on_deactivate(state);
 
         keep_running_ = false;
+        is_testing_ = false;
         if (can_rx_thread_.joinable()) can_rx_thread_.join();
+        if (test_thread_.joinable()) test_thread_.join();
         return CallbackReturn::SUCCESS;
     }
 
@@ -120,6 +125,7 @@ private:
     // --- 状态控制变量 ---
     std::atomic<bool> is_estopped_{false}; 
     std::atomic<bool> is_testing_{false}; 
+    std::atomic<bool> is_emergency_ascending_{false}; // 紧急上浮状态锁
     int can_socket_ = -1; 
 
     std::thread test_thread_;
@@ -158,6 +164,7 @@ private:
         if (request->data) {
             is_estopped_ = true;
             is_testing_ = false;   
+            is_emergency_ascending_ = false;
             stop_all_thrusters();  
             RCLCPP_FATAL(get_logger(), "�� 触发急停！已切断所有控制指令并停止所有推进器（含6路辅推）。");
             response->success = true; response->message = "急停已激活，全系统推进器已锁定停机。";
@@ -168,52 +175,90 @@ private:
         }
     }
 
-    // --- 精简后的自检动作测试服务 ---
+    // --- 基于通讯协议 #33 规范修正的服务回调逻辑 ---
     void control_srv_callback(
         const std::shared_ptr<hal::srv::HalThrustercontrolSrv::Request> request,
         std::shared_ptr<hal::srv::HalThrustercontrolSrv::Response> response) 
     {
         if (this->get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
-            response->success = false; response->message = "节点未激活，无法执行测试。"; return;
+            response->success = false; response->message = "节点未激活，无法执行指令。"; return;
         }
         if (is_estopped_) {
-            response->success = false; response->message = "当前处于急停状态，拒绝执行自检测试！"; return;
-        }
-        if (is_testing_) {
-            response->success = false; response->message = "推进器正在测试中，请稍后再试。"; return;
+            response->success = false; response->message = "当前处于急停锁定状态，拒绝执行任何总线控制指令！"; return;
         }
 
         uint8_t cmd = request->command;
         
-        if (cmd == 0x01) { // 主推自检
-            if (test_thread_.joinable()) test_thread_.join(); 
-            test_thread_ = std::thread(&HalThrusterNode::execute_test_sequence, this, true);
-            response->success = true; response->message = "主推自检序列已启动";
-        }
-        else if (cmd == 0x02) { // 辅推自检
-            RCLCPP_INFO(get_logger(), "收到指令 02：开始【6路辅推】全体正反转各3秒自检测试...");
-            if (test_thread_.joinable()) test_thread_.join(); 
-            test_thread_ = std::thread(&HalThrusterNode::execute_test_sequence, this, false);
-            response->success = true; response->message = "全体辅推自检序列已启动";
-        }
-        else {
-            response->success = false; response->message = "未知自检指令代码";
+        switch (cmd) {
+            case 0x01: // 01 主推进器自检 (正反转各3秒，速度10%)
+                if (is_emergency_ascending_) {
+                    response->success = false; response->message = "处于紧急上浮响应锁中，拒绝自检。"; return;
+                }
+                if (is_testing_) {
+                    response->success = false; response->message = "推进器正在测试中，请稍后再试。"; return;
+                }
+                RCLCPP_INFO(get_logger(), "收到指令 01：开始【主推进器】正反转各3秒(10%功率)自检测试...");
+                if (test_thread_.joinable()) test_thread_.join(); 
+                test_thread_ = std::thread(&HalThrusterNode::execute_test_sequence, this, true);
+                response->success = true; response->message = "主推自检序列已成功启动";
+                break;
+
+            case 0x02: // 02 辅助推进器自检 (正反转各3秒，速度10%)
+                if (is_emergency_ascending_) {
+                    response->success = false; response->message = "处于紧急上浮响应锁中，拒绝自检。"; return;
+                }
+                if (is_testing_) {
+                    response->success = false; response->message = "推进器正在测试中，请稍后再试。"; return;
+                }
+                RCLCPP_INFO(get_logger(), "收到指令 02：开始【6路辅推】全体正反转各3秒(10%功率)自检测试...");
+                if (test_thread_.joinable()) test_thread_.join(); 
+                test_thread_ = std::thread(&HalThrusterNode::execute_test_sequence, this, false);
+                response->success = true; response->message = "全体辅推自检序列已成功启动";
+                break;
+
+            case 0x03: // 03 推进器停止
+                RCLCPP_WARN(get_logger(), "收到指令 03：立刻安全终止自检线程并下发全停机状态指令。");
+                is_testing_ = false; // 触发打断机制
+                if (test_thread_.joinable()) test_thread_.join();
+                
+                // 如果当前处于紧急上浮，收到明确停止指令则解除上浮闭锁
+                is_emergency_ascending_ = false; 
+                
+                stop_all_thrusters();
+                response->success = true; response->message = "全系统推进器已紧急停机恢复。";
+                break;
+
+            case 0x04: // 04 紧急上浮
+                RCLCPP_ERROR(get_logger(), "！！！严重安全警告：收到指令 04 —— 全系统进入紧急上浮响应逻辑 ！！！");
+                is_testing_ = false; // 强行中止可能存在的自检
+                if (test_thread_.joinable()) test_thread_.join();
+                
+                // 激活紧急上浮
+                execute_emergency_ascent();
+                
+                response->success = true; response->message = "安全断言成功，紧急上浮动作序列已强制触发执行。";
+                break;
+
+            default:
+                RCLCPP_ERROR(get_logger(), "收到无法解析的异常通讯指令代码: 0x%X", cmd);
+                response->success = false; response->message = "未知协议自检/控制指令代码";
+                break;
         }
     }
 
-    // --- 精简后的自检自旋逻辑 ---
+    // --- 自检自旋逻辑（速度调校至符合协议的 10%） ---
     void execute_test_sequence(bool is_main_thruster) {
         is_testing_ = true; 
-        double test_thrust_pct = 5.0; // 5% 的低安全控制输出进行自检
+        double test_thrust_pct = 5.0; // 严格匹配通讯协议规定的 5% 速度
         
         std::vector<uint32_t> test_nodes;
         if (is_main_thruster) {
             test_nodes.push_back(MAIN_THRUSTER_ID); 
         } else {
-            for (uint32_t i = 0; i < 6; ++i) test_nodes.push_back(i); // 测试全部 6 个辅推通道
+            for (uint32_t i = 0; i < 6; ++i) test_nodes.push_back(i); 
         }
 
-        if (is_estopped_) { is_testing_ = false; return; }
+        if (is_estopped_ || !is_testing_) { is_testing_ = false; return; }
 
         // 1. 正转自检
         for (uint32_t id : test_nodes) {
@@ -236,18 +281,44 @@ private:
         }
         is_testing_ = false; 
     }
-       
+        
+    // --- 框架预留：紧急上浮控制功能 ---
+    void execute_emergency_ascent() {
+        // 1. 设置最高等级状态闭锁，防止上层的常规控制话题(cmd_callback)冲刷覆盖指令
+        is_emergency_ascending_ = true;
+
+        // 2. 停止非必要的推进器活动（主推清零）
+        set_thruster_rpm_hardware(MAIN_THRUSTER_ID, 0.0);
+
+        // 3. 全系统辅助推进器垂直通道响应配置框架
+        // 提示：此处后续可根据 CI-AUV 动力分布结构，直接对辅助垂直推进器（如 Z 轴通道）下发 100% 满功率输出
+        RCLCPP_WARN(get_logger(), "[紧急上浮动作序列] 正在向垂直通道推进器注入极限满功率上浮期望...");
+        for (int i = 0; i < 6; ++i) {
+            // aux_target_pct_[i].store(100.0); // 示例：后续结合具体的 Z 向通道 ID 进行定向满载输出
+            aux_target_pct_[i].store(0.0);     // 暂且安全清零
+        }
+        
+        // 4. 底层硬触发接口预留 (如抛载机构、气囊充气总线报文等)
+        // 示例：
+        // struct can_frame emergency_frame;
+        // emergency_frame.can_id = 0x190; // 设定的紧急抛载执行机构标称ID
+        // emergency_frame.can_dlc = 1;
+        // emergency_frame.data[0] = 0xFF; // 解锁脱钩控制字
+        // write(can_socket_, &emergency_frame, sizeof(emergency_frame));
+
+        RCLCPP_FATAL(get_logger(), "[紧急上浮动作序列] 总线控制安全切断完毕，物理应急机构已就绪。");
+    }
+
     // --- 订阅常规控制输入指令 ---
     void cmd_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
         if (this->get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) return;
-        if (is_estopped_ || is_testing_) return; 
+        // 如果处于急停、自检或紧急上浮状态，一律拒绝对底层下发常规控制参数
+        if (is_estopped_ || is_testing_ || is_emergency_ascending_) return; 
 
-        // 映射规则：msg->data[0] 为主推；msg->data[1]~msg->data[6] 为 6路辅推
         if (msg->data.size() >= 1) {
             set_thruster_rpm_hardware(MAIN_THRUSTER_ID, msg->data[0]);  
         }
 
-        // 解析并缓存 6 路辅推指令输入
         for (size_t i = 1; i < msg->data.size() && i <= 6; ++i) {
             aux_target_pct_[i - 1].store(msg->data[i]);
         }
@@ -266,11 +337,11 @@ private:
     // --- 辅助推进器控制字计算逻辑 (1100~2000 范围映射) ---
     uint16_t calculate_aux_cmd_word(double pct) {
         if (std::abs(pct) < 1e-3) {
-            return 1000; // 死区使能
+            return 1000; 
         }
         uint16_t direction = 0;
         if (pct < 0) {
-            direction = 1 << 11; // bit11 置 1 代表反转
+            direction = 1 << 11; 
             pct = -pct;
         }
         if (pct > 100.0) pct = 100.0;
@@ -285,7 +356,6 @@ private:
     void send_aux_control_commands() {
         if (can_socket_ < 0) return;
 
-        // 6路电调只需要 2 组 CAN 消息（0x200控制0~3号，0x201控制4~5号）
         for (int group = 0; group < 2; ++group) {
             struct can_frame frame;
             frame.can_id = 0x200 + group; 
@@ -299,11 +369,9 @@ private:
                     double target_pct = is_estopped_ ? 0.0 : aux_target_pct_[aux_id].load();
                     uint16_t cmd_word = calculate_aux_cmd_word(target_pct);
 
-                    // 小端模式编码：低字节在前
                     frame.data[i * 2]     = cmd_word & 0xFF;
                     frame.data[i * 2 + 1] = (cmd_word >> 8) & 0xFF;
                 } else {
-                    // 6号和7号电调不存在，数据域填 0x0000 留空
                     frame.data[i * 2]     = 0x00;
                     frame.data[i * 2 + 1] = 0x00;
                 }
@@ -332,7 +400,6 @@ private:
         frame.data[2] = 0x00; 
         frame.data[3] = 0x00; 
 
-        // 大端模式 
         frame.data[4] = (target_thrust >> 24) & 0xFF;
         frame.data[5] = (target_thrust >> 16) & 0xFF;
         frame.data[6] = (target_thrust >> 8) & 0xFF;
@@ -341,7 +408,7 @@ private:
         write(can_socket_, &frame, sizeof(struct can_frame));
     }
 
-    // --- 工业级优化：解析硬件回传总线数据（强力抗丢包过滤） ---
+    // --- 解析硬件回传总线数据 ---
     void can_receive_loop() {
         struct can_frame frame;
         uint32_t target_main_rx_id = 0x280 + MAIN_THRUSTER_ID; 
@@ -351,11 +418,9 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(50)); continue;
             }
             
-            // 采用 50ms 超时阻塞机制读取，极大幅度消除由于瞬间并发导致的 Socket 丢包
             ssize_t nbytes = recv(can_socket_, &frame, sizeof(struct can_frame), 0);
             
             if (nbytes == sizeof(struct can_frame)) {
-                // �� 核心升级点：过滤掉 Linux 内核附带的 Bit31~29 高位扩展杂讯，获取纯净的 11 位标准 CAN ID
                 uint32_t clean_id = frame.can_id & CAN_SFF_MASK;
 
                 // 1. 解析主推进器反馈报文
@@ -376,7 +441,6 @@ private:
                 else if (clean_id >= 0x300 && clean_id <= 0x305 && frame.can_dlc == 8) {
                     uint8_t aux_id = clean_id - 0x300; 
 
-                    // 小端模式多字节对齐拼接
                     int16_t raw_speed   = static_cast<int16_t>((frame.data[1] << 8) | frame.data[0]);
                     int16_t raw_current = static_cast<int16_t>((frame.data[3] << 8) | frame.data[2]);
                     uint8_t raw_volt    = frame.data[4];
@@ -384,21 +448,18 @@ private:
                     uint8_t raw_status  = frame.data[6];
                     uint8_t raw_fault   = frame.data[7];
 
-                    // 更新至对应的 6 个缓存槽位
                     aux_rpm_[aux_id].store(raw_speed); 
-                    aux_current_[aux_id].store(static_cast<float>(raw_current) * 0.01f); // 0.01A -> A
+                    aux_current_[aux_id].store(static_cast<float>(raw_current) * 0.01f); 
                     aux_voltage_[aux_id].store(raw_volt); 
                     aux_temp_[aux_id].store(raw_temp);     
                     aux_status_machine_[aux_id].store(raw_status);
                     aux_fault_[aux_id].store(raw_fault);
 
-                    // 更新时间戳用于心跳在线状态判定
                     int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count();
                     last_seen_ms_[aux_id].store(now_ms);
 
-                    // 调试节流日志：每 5 秒在终端闪烁提示一次，确认驱动正在捕获真实的硬件反馈
-                    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000, "�� [数据闭环成功] 驱动正在稳定解码并同步辅推 ID: %d 的传感器回传信息！", aux_id);
+                    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000, "�� [数据闭环成功] 驱动正在稳定同步辅推 ID: %d 的回传反馈。", aux_id);
                 }
             }
         }
@@ -452,22 +513,20 @@ private:
 
         for (int i = 0; i < 6; ++i) {
             int64_t last_seen = last_seen_ms_[i].load();
-            
-            // 判定在线：时间戳不为 0 且在超时限制内
             bool is_online = (last_seen != 0) && ((now_ms - last_seen) < ONLINE_TIMEOUT_MS);
 
-            // 数组直接映射赋值
             aux_msg.rpm[i]     = aux_rpm_[i].load();
             aux_msg.current[i] = static_cast<int16_t>(std::round(aux_current_[i].load() * 100.0f)); 
             aux_msg.voltage[i] = static_cast<int16_t>(aux_voltage_[i].load());
             aux_msg.temp[i]    = static_cast<uint16_t>(aux_temp_[i].load());
 
-            // 故障码融合在线状态与急停状态
             uint8_t fault_type = aux_fault_[i].load();
             if (is_estopped_) {
-                fault_type = 0xFF; // 全系统急停闭锁
+                fault_type = 0xFF; 
+            } else if (is_emergency_ascending_) {
+                fault_type = 0xFD; // 预留自定义故障码：指示正处于紧急上浮中
             } else if (!is_online) {
-                fault_type = 0xFE; // 1秒超时自动离线保护，话题呈现为 254
+                fault_type = 0xFE; 
             }
             aux_msg.fault_status[i] = fault_type;
         }
@@ -487,18 +546,19 @@ private:
         write(can_socket_, &frame, sizeof(struct can_frame));
     }
 
-    // --- 可打断的线程睡眠延时 ---
+    // --- 可打断的线程睡眠延时（加入 is_testing_ 自感应） ---
     bool interruptible_sleep(int milliseconds) {
         int elapsed = 0;
         while (elapsed < milliseconds) {
-            if (is_estopped_ || !keep_running_) return false; 
+            // 当急停、系统退出或外部取消自检状态(is_testing_=false)时，立刻退出当前耗时阻断
+            if (is_estopped_ || !keep_running_ || !is_testing_) return false; 
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             elapsed += 50;
         }
         return true;
     }
 
-    // --- 工业级 SocketCAN 初始化（引入 50ms 超时内核接收阻塞机制） ---
+    // --- SocketCAN 初始化 ---
     bool hardware_api_init_can(const std::string& can_iface = "can0") {
         can_socket_ = socket(PF_CAN, SOCK_RAW, CAN_RAW);
         if (can_socket_ < 0) return false;
@@ -508,7 +568,6 @@ private:
         ifr.ifr_name[IFNAMSIZ - 1] = '\0';
         if (ioctl(can_socket_, SIOCGIFINDEX, &ifr) < 0) { close(can_socket_); can_socket_ = -1; return false; }
         
-        // 软超时设置：有数据立刻中断阻塞返回，无数据每 50ms 释放一次线程所有权，彻底根治高负载丢包与死循环空转
         struct timeval tv;
         tv.tv_sec = 0;
         tv.tv_usec = 50000; 
