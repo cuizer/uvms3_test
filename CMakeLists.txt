@@ -43,12 +43,12 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/CanMsgOut.msg"
   "msg/HalbinocameraMsg.msg"
   "srv/HalbinocameraSrv.srv"
+  "msg/HalArmmotor.msg"
+  "srv/HalArmMotorCmd.srv"
+
   DEPENDENCIES std_msgs builtin_interfaces
 )
 
-# ==============================================================================
-# 直接把所有源码合成一个节点！彻底消灭库错误！
-# ==============================================================================
 add_executable(manipulator_driver
   src/uvms_hal_manipulator/manipulator_node.cpp
   src/uvms_hal_manipulator/can_driver.cpp
@@ -65,6 +65,10 @@ ament_target_dependencies(manipulator_driver
   lifecycle_msgs
   std_srvs
 )
+# ==============================
+# 【机械臂节点添加接口依赖】
+# ==============================
+rosidl_target_interfaces(manipulator_driver ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 # ==============================================================================
 add_executable(dual_arm_lifecycle_manager
