@@ -42,6 +42,7 @@ public:
         // ==========================================
         timer_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         sub_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        srv_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         
         // ==========================================
         // 2. 初始化发布者
@@ -50,11 +51,13 @@ public:
         pub_wing_status_ = this->create_publisher<hal::msg::HalWingservo>("/hal/wingservo", 10);
         
         // ==========================================
-        // 3. 对应协议 #34 节点消息命名：/hal/servocontrol
+        // 3. 初始化服务 (绑定到 srv_cb_group_)
         // ==========================================
         srv_control_ = this->create_service<hal::srv::HalServocontrolSrv>(
             "/hal/servocontrol",
-            std::bind(&HalServoNode::control_srv_callback, this, std::placeholders::_1, std::placeholders::_2));
+            std::bind(&HalServoNode::control_srv_callback, this, std::placeholders::_1, std::placeholders::_2),
+            rmw_qos_profile_services_default,
+            srv_cb_group_);
         
         // ==========================================
         // 4. 初始化订阅者 (绑定到 sub_cb_group_)
@@ -79,6 +82,7 @@ public:
             std::chrono::milliseconds(4),
             std::bind(&HalServoNode::timer_publish_status_callback, this),
             timer_cb_group_);
+        timer_->cancel(); // 默认挂起，避免 Inactive 状态空转
         
         // ==========================================
         // 6. 初始化硬件与后台读取线程
@@ -94,6 +98,11 @@ public:
         RCLCPP_INFO(get_logger(), "舵机节点已激活。");
         pub_tail_status_->on_activate();
         pub_wing_status_->on_activate();
+        
+        // [新增] 激活时重置看门狗时间戳，防止刚启动就误报断联
+        last_valid_rx_time_.store(this->get_clock()->now().nanoseconds());
+        
+        timer_->reset(); // 激活状态才开启定时器
         is_testing_ = false;
         LifecycleNode::on_activate(state);
         return CallbackReturn::SUCCESS;
@@ -101,6 +110,8 @@ public:
 
     CallbackReturn on_deactivate(const rclcpp_lifecycle::State & state) override {
         RCLCPP_INFO(get_logger(), "舵机节点停用，终止测试并强制舵机回中。");
+        timer_->cancel(); // 停用状态挂起定时器
+        
         is_testing_ = false; // 触发自检退出
         if (test_thread_.joinable()) test_thread_.join();
 
@@ -139,6 +150,9 @@ public:
 private:
     double max_angle_;
     std::atomic<bool> is_testing_{false};
+    
+    // [新增] 软件看门狗时间戳
+    std::atomic<int64_t> last_valid_rx_time_{0};
 
     uint8_t current_poll_id_ = 0;
 
@@ -146,7 +160,7 @@ private:
     int serial_fd_ = -1;
     std::mutex serial_write_mutex_;
     std::thread read_thread_;
-    std::thread test_thread_; // 统一管理的自检测试线程
+    std::thread test_thread_; 
     std::atomic<bool> keep_reading_{false};
 
     // 数据缓存池
@@ -164,6 +178,7 @@ private:
 
     rclcpp::CallbackGroup::SharedPtr timer_cb_group_;
     rclcpp::CallbackGroup::SharedPtr sub_cb_group_;
+    rclcpp::CallbackGroup::SharedPtr srv_cb_group_;
 
     // ==========================================
     // ⚙️ 通信协议引擎
@@ -184,12 +199,8 @@ private:
         std::lock_guard<std::mutex> lock(serial_write_mutex_);
         if (serial_fd_ < 0) return;
 
-        if (data.size() > 2 && data[2] == 0x08) {
-            RCLCPP_DEBUG(this->get_logger(), "串口下发控制包成功");
-        }
-
         write(serial_fd_, data.data(), data.size());
-        tcdrain(serial_fd_);
+        // 故意移除 tcdrain，使用底层异步发送
     }
 
     // ==========================================
@@ -199,26 +210,38 @@ private:
         int state = 0;
         uint8_t cmd_id = 0, length = 0, checksum = 0;
         std::vector<uint8_t> payload;
+        
+        // 使用块读取，大幅降低 read 系统调用开销
+        uint8_t buffer[256];
 
         while (keep_reading_) {
-            uint8_t byte;
-            if (read(serial_fd_, &byte, 1) > 0) {
-                switch(state) {
-                    case 0: if (byte == 0x05) state = 1; break;
-                    case 1: if (byte == 0x1C) state = 2; else state = (byte == 0x05) ? 1 : 0; break;
-                    case 2: cmd_id = byte; state = 3; break;
-                    case 3: length = byte; payload.clear(); state = (length > 0) ? 4 : 5; break;
-                    case 4:
-                        payload.push_back(byte);
-                        if (payload.size() == length) state = 5;
-                        break;
-                    case 5:
-                        checksum = byte;
-                        uint32_t sum = 0x05 + 0x1C + cmd_id + length;
-                        for (uint8_t b : payload) sum += b;
-                        if ((sum % 256) == checksum) process_servo_response(cmd_id, payload);
-                        state = 0;
-                        break;
+            int bytes_read = read(serial_fd_, buffer, sizeof(buffer));
+            if (bytes_read > 0) {
+                for (int i = 0; i < bytes_read; ++i) {
+                    uint8_t byte = buffer[i];
+                    switch(state) {
+                        case 0: if (byte == 0x05) state = 1; break;
+                        case 1: if (byte == 0x1C) state = 2; else state = (byte == 0x05) ? 1 : 0; break;
+                        case 2: cmd_id = byte; state = 3; break;
+                        case 3: 
+                            length = byte; 
+                            // 异常长度防御
+                            if (length > 64) { state = 0; break; }
+                            payload.clear(); 
+                            state = (length > 0) ? 4 : 5; 
+                            break;
+                        case 4:
+                            payload.push_back(byte);
+                            if (payload.size() == length) state = 5;
+                            break;
+                        case 5:
+                            checksum = byte;
+                            uint32_t sum = 0x05 + 0x1C + cmd_id + length;
+                            for (uint8_t b : payload) sum += b;
+                            if ((sum % 256) == checksum) process_servo_response(cmd_id, payload);
+                            state = 0;
+                            break;
+                    }
                 }
             } else {
                 std::this_thread::sleep_for(std::chrono::microseconds(500));
@@ -228,6 +251,10 @@ private:
 
     void process_servo_response(uint8_t cmd_id, const std::vector<uint8_t>& payload) {
         if (cmd_id == 0x0A && payload.size() >= 3) {
+            
+            // [新增] 喂狗：只要成功解包一帧正确的状态反馈，就更新时间戳
+            last_valid_rx_time_.store(this->get_clock()->now().nanoseconds());
+
             uint8_t servo_id = payload[0];
             int16_t pos_raw = static_cast<int16_t>((payload[2] << 8) | payload[1]);
             float angle = static_cast<float>(pos_raw) / 10.0f;
@@ -247,11 +274,22 @@ private:
     void timer_publish_status_callback() {
         if (this->get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) return;
 
+        // 无论如何，定时下发探寻指令
         hardware_serial_write(pack_command(0x0A, {current_poll_id_}));
         current_poll_id_ = (current_poll_id_ + 1) % 6;
 
         if (current_poll_id_ == 0) {
             int64_t current_timestamp = this->get_clock()->now().nanoseconds();
+
+            // [核心] 看门狗拦截：判断是否超过 100ms 未收到数据 (100,000,000 纳秒)
+            if (current_timestamp - last_valid_rx_time_.load() > 100000000) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, 
+                    "⚠️ 严重警告：总线通信超时！舵机疑似掉线或断电。[看门狗触发] 已停止发布僵尸数据。");
+                // 方案 A：直接 return，切断 Topic 发布。上层节点将因为订阅超时而触发 Failsafe
+                return; 
+            }
+
+            // 数据依然新鲜，正常发布
             {
                 std::lock_guard<std::mutex> lock(data_cache_mutex_);
                 cached_tail_msg_.timestamp = current_timestamp;
@@ -305,13 +343,16 @@ private:
         if (this->get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
             res->success = false; res->message = "节点未就绪（非Active状态）"; return;
         }
-        if (is_testing_) {
-            res->success = false; res->message = "当前舵机正在执行自检序列，拒绝重入"; return;
-        }
 
         uint8_t cmd = req->command;
         if (cmd == 0x01 || cmd == 0x02) {
-            if (test_thread_.joinable()) test_thread_.join(); // 回收残余线程句柄
+            // 原子操作锁定执行状态，防止连续下发请求导致线程 join 死锁
+            bool expected = false;
+            if (!is_testing_.compare_exchange_strong(expected, true)) {
+                res->success = false; res->message = "当前舵机正在执行自检序列，拒绝重入"; return;
+            }
+
+            if (test_thread_.joinable()) test_thread_.join(); 
             
             test_thread_ = std::thread(&HalServoNode::execute_test_sequence, this, cmd == 0x01);
             res->success = true; res->message = "舵机自检测试已成功异步启动";
@@ -320,40 +361,53 @@ private:
         }
     }
 
-    // 严格按照协议实现：“舵机正反转各3°” 自检逻辑
     void execute_test_sequence(bool is_tail) {
-        is_testing_ = true;
-        double target_test_angle = 15.0; // 严格匹配协议规定的 3 度偏转角
+        double target_test_angle = 15.0; 
         
         auto set_angles = [&](double a) { 
             if(is_tail) {
-                for(int i=0; i<=3; ++i) send_angle_command(i, a); 
+                for(int i=0; i<=3; ++i) {
+                    send_angle_command(i, a); 
+                    // [核心修复 1] 帧间缓冲延时。给单片机喘息时间，防止连续发包冲爆 MCU 的串口中断
+                    std::this_thread::sleep_for(std::chrono::milliseconds(4)); 
+                }
             } else {
-                for(int i=4; i<=5; ++i) send_angle_command(i, a); 
+                for(int i=4; i<=5; ++i) {
+                    send_angle_command(i, a); 
+                    std::this_thread::sleep_for(std::chrono::milliseconds(4));
+                }
             }
         };
 
         if (!keep_reading_ || !is_testing_) { is_testing_ = false; return; }
 
-        // 1. 正转 3°
+        // 1. 正转
         set_angles(target_test_angle);  
         if (!interruptible_sleep(3000)) { is_testing_ = false; return; }
 
-        // 2. 反转 3°
+        // 2. 反转
         set_angles(-target_test_angle); 
         if (!interruptible_sleep(3000)) { is_testing_ = false; return; }
 
         // 3. 停机恢复回中
         set_angles(0.0); 
         is_testing_ = false;
-        RCLCPP_INFO(get_logger(), "协议 #34 规定的舵机正反转各15°自检序列执行完毕。");
+        RCLCPP_INFO(get_logger(), "协议 #34 规定的舵机自检序列执行完毕。");
     }
 
-    // 可响应生命周期打断的线程延时
     bool interruptible_sleep(int milliseconds) {
         int elapsed = 0;
         while (elapsed < milliseconds) {
+            // 原有的生命周期打断
             if (!keep_reading_ || !is_testing_) return false;
+            
+            // [核心修复 2] 将看门狗与自检线程联动
+            int64_t current_timestamp = this->get_clock()->now().nanoseconds();
+            if (current_timestamp - last_valid_rx_time_.load() > 100000000) {
+                RCLCPP_ERROR(this->get_logger(), "自检强行中止：检测到舵机物理掉线或电源电压跌落！");
+                return false; // 立刻打断这 3000 毫秒的死等
+            }
+            
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             elapsed += 50;
         }
@@ -361,11 +415,11 @@ private:
     }
 
     // ==========================================
-    // ��️ 硬件底层接口
+    // ⚙️ 硬件底层接口
     // ==========================================
     void hardware_api_init() {
         std::string port_name = "/dev/ttyTHS0";
-        serial_fd_ = open(port_name.c_str(), O_RDWR | O_NOCTTY);
+        serial_fd_ = open(port_name.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK); // O_NONBLOCK 防卡死
         if (serial_fd_ < 0) {
             RCLCPP_ERROR(get_logger(), "无法打开串口 %s: %s", port_name.c_str(), strerror(errno));
             return;
@@ -385,7 +439,7 @@ private:
         opt.c_oflag &= ~OPOST;                  
     
         opt.c_cc[VMIN] = 0;  
-        opt.c_cc[VTIME] = 1; 
+        opt.c_cc[VTIME] = 0; // 配合非阻塞轮询释放 CPU
     
         tcflush(serial_fd_, TCIFLUSH); 
         tcsetattr(serial_fd_, TCSANOW, &opt);

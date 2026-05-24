@@ -126,7 +126,8 @@ private:
     std::atomic<bool> is_estopped_{false}; 
     std::atomic<bool> is_testing_{false}; 
     std::atomic<bool> is_emergency_ascending_{false}; // 紧急上浮状态锁
-    int can_socket_ = -1; 
+    // 改变原有定义，加入 atomic，确保多线程下对 Socket 的读写关闭绝对安全
+    std::atomic<int> can_socket_{-1};
 
     std::thread test_thread_;
     std::thread can_rx_thread_;
@@ -176,6 +177,7 @@ private:
     }
 
     // --- 基于通讯协议 #33 规范修正的服务回调逻辑 ---
+    // --- 基于通讯协议 #33 规范修正的服务回调逻辑 ---
     void control_srv_callback(
         const std::shared_ptr<hal::srv::HalThrustercontrolSrv::Request> request,
         std::shared_ptr<hal::srv::HalThrustercontrolSrv::Response> response) 
@@ -183,14 +185,18 @@ private:
         if (this->get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
             response->success = false; response->message = "节点未激活，无法执行指令。"; return;
         }
-        if (is_estopped_) {
-            response->success = false; response->message = "当前处于急停锁定状态，拒绝执行任何总线控制指令！"; return;
-        }
 
         uint8_t cmd = request->command;
-        
+
+        // 【关键修复】如果处于急停状态，除了 0x04(解除急停) 和 0x03(重复急停) 以外的指令一律拦截！
+        if (is_estopped_ && cmd != 0x04 && cmd != 0x03) {
+            response->success = false; 
+            response->message = "当前处于急停锁定状态，拒绝执行任何指令！请先发送 0x04 解除急停。"; 
+            return;
+        }
+
         switch (cmd) {
-            case 0x01: // 01 主推进器自检 (正反转各3秒，速度10%)
+            case 0x01: // 01 主推进器自检
                 if (is_emergency_ascending_) {
                     response->success = false; response->message = "处于紧急上浮响应锁中，拒绝自检。"; return;
                 }
@@ -203,7 +209,7 @@ private:
                 response->success = true; response->message = "主推自检序列已成功启动";
                 break;
 
-            case 0x02: // 02 辅助推进器自检 (正反转各3秒，速度10%)
+            case 0x02: // 02 辅助推进器自检
                 if (is_emergency_ascending_) {
                     response->success = false; response->message = "处于紧急上浮响应锁中，拒绝自检。"; return;
                 }
@@ -216,32 +222,49 @@ private:
                 response->success = true; response->message = "全体辅推自检序列已成功启动";
                 break;
 
-            case 0x03: // 03 推进器停止
-                RCLCPP_WARN(get_logger(), "收到指令 03：立刻安全终止自检线程并下发全停机状态指令。");
-                is_testing_ = false; // 触发打断机制
-                if (test_thread_.joinable()) test_thread_.join();
+            case 0x03: // 03 推进器急停与完全锁定
+                RCLCPP_FATAL(get_logger(), "�� 收到指令 03：触发全局急停锁死！切断所有控制话题响应并停止所有推进器。");
+                is_estopped_ = true;             // 激活最高安全锁
+                is_testing_ = false;             // 打断自检
+                is_emergency_ascending_ = false; // 解除紧急上浮锁
                 
-                // 如果当前处于紧急上浮，收到明确停止指令则解除上浮闭锁
-                is_emergency_ascending_ = false; 
+                // 改用 detach，防止线程睡眠阻塞当前服务，让其自然结束
+                if (test_thread_.joinable()) test_thread_.detach();
                 
-                stop_all_thrusters();
-                response->success = true; response->message = "全系统推进器已紧急停机恢复。";
+                stop_all_thrusters(); // 强制底层停机
+                
+                response->success = true; 
+                response->message = "急停指令已生效，全系统推进器已锁定停机，拒收新推力。";
                 break;
 
-            case 0x04: // 04 紧急上浮
-                RCLCPP_ERROR(get_logger(), "！！！严重安全警告：收到指令 04 —— 全系统进入紧急上浮响应逻辑 ！！！");
+            case 0x04: // 04 解除急停
+                if (is_estopped_) {
+                    is_estopped_ = false; // 解除安全锁
+                    RCLCPP_INFO(get_logger(), "✅ 收到指令 04：急停锁定已解除，系统恢复常规话题控制。");
+                    response->success = true; 
+                    response->message = "急停已解除，推进器重新接受 cmd 话题控制。";
+                } else {
+                    RCLCPP_INFO(get_logger(), "收到指令 04：当前系统本身就不在急停状态。");
+                    response->success = true; 
+                    response->message = "系统未锁定，运行正常。";
+                }
+                break;
+
+            case 0x05: // 05 紧急上浮 (原 04)
+                RCLCPP_ERROR(get_logger(), "！！！严重安全警告：收到指令 05 —— 全系统进入紧急上浮响应逻辑 ！！！");
                 is_testing_ = false; // 强行中止可能存在的自检
-                if (test_thread_.joinable()) test_thread_.join();
                 
-                // 激活紧急上浮
+                if (test_thread_.joinable()) test_thread_.detach();
+                
                 execute_emergency_ascent();
                 
-                response->success = true; response->message = "安全断言成功，紧急上浮动作序列已强制触发执行。";
+                response->success = true; 
+                response->message = "安全断言成功，紧急上浮动作序列已强制触发执行。";
                 break;
 
             default:
                 RCLCPP_ERROR(get_logger(), "收到无法解析的异常通讯指令代码: 0x%X", cmd);
-                response->success = false; response->message = "未知协议自检/控制指令代码";
+                response->success = false; response->message = "未知协议指令代码";
                 break;
         }
     }
@@ -354,77 +377,130 @@ private:
 
     // --- 向硬件周期下发辅推控制数据 (0x200 和 0x201) ---
     void send_aux_control_commands() {
-        if (can_socket_ < 0) return;
-
+        // 1. 原子化获取套接字
+        int fd = can_socket_.load();
+        if (fd < 0) return; // 如果正在重连，直接丢弃下发指令
+    
         for (int group = 0; group < 2; ++group) {
             struct can_frame frame;
             frame.can_id = 0x200 + group; 
             frame.can_dlc = 8;
             std::memset(frame.data, 0, 8);
-
+    
             for (int i = 0; i < 4; ++i) {
                 int aux_id = group * 4 + i;
-                
                 if (aux_id < 6) { 
                     double target_pct = is_estopped_ ? 0.0 : aux_target_pct_[aux_id].load();
                     uint16_t cmd_word = calculate_aux_cmd_word(target_pct);
-
                     frame.data[i * 2]     = cmd_word & 0xFF;
                     frame.data[i * 2 + 1] = (cmd_word >> 8) & 0xFF;
                 } else {
                     frame.data[i * 2]     = 0x00;
-                    frame.data[i * 2 + 1] = 0x00;
+                    frame.data[i * 2 + 1] = (0x00 >> 8) & 0xFF;
                 }
             }
-
-            if (write(can_socket_, &frame, sizeof(struct can_frame)) < 0) {
-                RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000, "辅推 CAN 发送失败！ID: 0x%X", frame.can_id);
+    
+            // 2. 写入时使用局部 fd
+            ssize_t bytes_written = write(fd, &frame, sizeof(struct can_frame));
+            
+            if (bytes_written < 0) {
+                // 3. 断线重连判定
+                if (errno == ENETDOWN || errno == ENODEV || errno == EBADF) {
+                    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, 
+                        "⚠️ 发送端(辅推下发)检测到 CAN 硬件宕机，已移交 RX 线程启动重连机制！");
+                    hardware_api_close_can(); // 触发闭锁
+                    break; // 硬件已断开，跳出循环，无需再发送第二帧
+                } else if (errno == ENOBUFS) {
+                    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, 
+                        "⚠️ 辅推 CAN 发送队列溢出，底层未响应...");
+                } else {
+                    RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 5000, 
+                        "辅推 CAN 发送严重异常，错误码: %d", errno);
+                }
             }
         }
     }
     
-    // --- 主推进器控制发送函数 (保持大端模式) ---
     void set_thruster_rpm_hardware(uint32_t target_node_id, double thrust_percentage) {
-        if (can_socket_ < 0) return;
+        int fd = can_socket_.load(); // 取出局部变量防止线程冲突
+        if (fd < 0) return;          // 如果正在重连，直接丢弃下发指令
+
+        
         if (thrust_percentage > 100.0) thrust_percentage = 100.0;
         if (thrust_percentage < -100.0) thrust_percentage = -100.0;
-
+    
         uint32_t can_id = 0x300 + target_node_id;
         int32_t target_thrust = static_cast<int32_t>(thrust_percentage);
         struct can_frame frame;
         frame.can_id = can_id; 
         frame.can_dlc = 8; 
-
+    
         frame.data[0] = 0x54; // 'T' 
         frame.data[1] = 0x43; // 'C' 
         frame.data[2] = 0x00; 
         frame.data[3] = 0x00; 
-
+    
         frame.data[4] = (target_thrust >> 24) & 0xFF;
         frame.data[5] = (target_thrust >> 16) & 0xFF;
         frame.data[6] = (target_thrust >> 8) & 0xFF;
         frame.data[7] = target_thrust & 0xFF;
-
-        write(can_socket_, &frame, sizeof(struct can_frame));
+    
+        ssize_t bytes_written = write(fd, &frame, sizeof(struct can_frame));
+        if (bytes_written < 0) {
+            // 加入 ENODEV 和 EBADF 判定
+            if (errno == ENETDOWN || errno == ENODEV || errno == EBADF) {
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, 
+                    "⚠️ 发送端检测到 CAN 硬件宕机，已移交 RX 线程启动重连机制！");
+                hardware_api_close_can(); // 触发闭锁，移交控制权
+            } else if (errno == ENOBUFS) {
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, 
+                    "⚠️ CAN 发送队列溢出，底层未响应...");
+            }
+        }
     }
+    
 
+    // --- 解析硬件回传总线数据 ---
     // --- 解析硬件回传总线数据 ---
     void can_receive_loop() {
         struct can_frame frame;
         uint32_t target_main_rx_id = 0x280 + MAIN_THRUSTER_ID; 
 
         while (keep_running_) {
-            if (can_socket_ < 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50)); continue;
+            // 获取当前有效的套接字
+            int current_fd = can_socket_.load();
+            
+            // 1. 重连逻辑
+            if (current_fd < 0) {
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, 
+                    "⚠️ CAN 总线未连接，尝试重连 can0...");
+                if (hardware_api_init_can("can0")) {
+                    RCLCPP_INFO(get_logger(), "�� CAN 总线重连恢复工作！");
+                } else {
+                    // 初始化失败，睡眠 1 秒后重试
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+                continue;
             }
             
-            ssize_t nbytes = recv(can_socket_, &frame, sizeof(struct can_frame), 0);
+            // 2. 接收数据
+            ssize_t nbytes = recv(current_fd, &frame, sizeof(struct can_frame), 0);
             
+            if (nbytes < 0) {
+                // 如果检测到物理宕机(ENETDOWN)、设备被拔出(ENODEV)或坏的描述符(EBADF)
+                if (errno == ENETDOWN || errno == ENODEV || errno == EBADF) {
+                    RCLCPP_ERROR(get_logger(), "�� 接收端检测到 CAN 物理层断开 (错误码: %d)，触发自动重连...", errno);
+                    hardware_api_close_can(); // 置为 -1 并关闭，下一次 while 循环将进入重连逻辑
+                    std::this_thread::sleep_for(std::chrono::seconds(1)); // 强制等待硬件恢复
+                }
+                continue; // 超时或其他非致命错误直接跳过，继续循环
+            }
+
+            // 3. 解析收到的报文 (保留你原本的代码)
             if (nbytes == sizeof(struct can_frame)) {
                 uint32_t clean_id = frame.can_id & CAN_SFF_MASK;
-
                 // 1. 解析主推进器反馈报文
-                if (clean_id == target_main_rx_id && frame.can_dlc == 8) {
+                  if (clean_id == target_main_rx_id && frame.can_dlc == 8) {
                     int32_t value = (frame.data[4] << 24) | (frame.data[5] << 16) | (frame.data[6] << 8) | frame.data[7];
                     if (frame.data[0] == 0x51) {
                         switch (frame.data[1]) {
@@ -533,19 +609,38 @@ private:
         pub_aux_status_->publish(aux_msg);
     }
 
-    // --- 向总线发送状态请求指令（主推专用） ---
-    void request_thruster_status(uint32_t target_node_id, uint8_t cmd_byte1, uint8_t cmd_byte2) {
-        if (can_socket_ < 0) return;
-        struct can_frame frame;
-        frame.can_id = 0x300 + target_node_id; 
-        frame.can_dlc = 4; 
-        frame.data[0] = cmd_byte1;
-        frame.data[1] = cmd_byte2;
-        frame.data[2] = 0x00; 
-        frame.data[3] = 0x00; 
-        write(can_socket_, &frame, sizeof(struct can_frame));
+// --- 向总线发送状态请求指令（主推专用） ---
+void request_thruster_status(uint32_t target_node_id, uint8_t cmd_byte1, uint8_t cmd_byte2) {
+    // 1. 原子化获取套接字
+    int fd = can_socket_.load();
+    if (fd < 0) return; // 如果正在重连，直接丢弃下发指令
+    
+    struct can_frame frame;
+    frame.can_id = 0x300 + target_node_id; 
+    frame.can_dlc = 4; 
+    frame.data[0] = cmd_byte1;
+    frame.data[1] = cmd_byte2;
+    frame.data[2] = 0x00; 
+    frame.data[3] = 0x00; 
+    
+    // 2. 写入时使用局部 fd，并获取写入结果
+    ssize_t bytes_written = write(fd, &frame, sizeof(struct can_frame));
+    
+    if (bytes_written < 0) {
+        // 3. 断线重连判定
+        if (errno == ENETDOWN || errno == ENODEV || errno == EBADF) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, 
+                "⚠️ 发送端(状态请求)检测到 CAN 硬件宕机，已移交 RX 线程启动重连机制！");
+            hardware_api_close_can(); // 触发闭锁
+        } else if (errno == ENOBUFS) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, 
+                "⚠️ 状态请求 CAN 发送队列溢出，底层未响应...");
+        } else {
+            RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 5000, 
+                "主推状态请求 CAN 写入错误，错误码: %d", errno);
+        }
     }
-
+}
     // --- 可打断的线程睡眠延时（加入 is_testing_ 自感应） ---
     bool interruptible_sleep(int milliseconds) {
         int elapsed = 0;
@@ -560,27 +655,47 @@ private:
 
     // --- SocketCAN 初始化 ---
     bool hardware_api_init_can(const std::string& can_iface = "can0") {
-        can_socket_ = socket(PF_CAN, SOCK_RAW, CAN_RAW);
-        if (can_socket_ < 0) return false;
+        if (can_socket_.load() >= 0) return true; // 如果已经连接，则跳过
+
+        int fd = socket(PF_CAN, SOCK_RAW, CAN_RAW);
+        if (fd < 0) return false;
         
         struct ifreq ifr;
         std::strncpy(ifr.ifr_name, can_iface.c_str(), IFNAMSIZ - 1);
         ifr.ifr_name[IFNAMSIZ - 1] = '\0';
-        if (ioctl(can_socket_, SIOCGIFINDEX, &ifr) < 0) { close(can_socket_); can_socket_ = -1; return false; }
+        if (ioctl(fd, SIOCGIFINDEX, &ifr) < 0) { close(fd); return false; }
         
+        // 设置 50ms 接收超时，防止 recv 永久阻塞导致无法及时响应重连或退出
         struct timeval tv;
         tv.tv_sec = 0;
         tv.tv_usec = 50000; 
-        setsockopt(can_socket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
         struct sockaddr_can addr;
-        addr.can_family = AF_CAN; addr.can_ifindex = ifr.ifr_ifindex;
-        if (bind(can_socket_, (struct sockaddr *)&addr, sizeof(addr)) < 0) { close(can_socket_); can_socket_ = -1; return false; }
+        addr.can_family = AF_CAN; 
+        addr.can_ifindex = ifr.ifr_ifindex;
+        
+        if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) { 
+            close(fd); 
+            return false; 
+        }
+
+        // 绑定成功后，原子化赋值
+        can_socket_.store(fd);
         RCLCPP_INFO(get_logger(), "✅ SocketCAN 接口 %s 初始化成功！", can_iface.c_str());
         return true;
     }
 
-    void hardware_api_close_can() { if (can_socket_ >= 0) { close(can_socket_); can_socket_ = -1; } }
+    // --- 安全关闭套接字 ---
+    void hardware_api_close_can() { 
+        // exchange(-1) 保证即使多个线程同时调用，也只有第一个能拿到非负数 fd 并 close
+        int fd = can_socket_.exchange(-1);
+        if (fd >= 0) { 
+            close(fd); 
+            RCLCPP_WARN(get_logger(), "�� CAN 套接字已安全关闭。");
+        } 
+    }
+    
 };
 
 int main(int argc, char ** argv) {
