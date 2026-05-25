@@ -42,7 +42,7 @@ public:
         auxithruster_sub_ = this->create_subscription<hal::msg::HalAuxithruster>("/hal/auxithruster",qos,std::bind(&BspCommNode::auxithruster_callback, this, std::placeholders::_1));
         battery_sub_      = this->create_subscription<hal::msg::HalBattery>("/hal/battery",qos,std::bind(&BspCommNode::battery_callback, this, std::placeholders::_1));
         tailservo_sub_    = this->create_subscription<hal::msg::HalTailservo>("/hal/tailservo",qos,std::bind(&BspCommNode::tailservo_callback, this, std::placeholders::_1));
-        armmotor_sub_     = this->create_subscription<uvms_msg_pkg::msg::HalArmmotor>("/hal/armmotor",qos,std::bind(&BspCommNode::armmotor_callback, this, std::placeholders::_1));
+        armmotor_sub_     = this->create_subscription<hal::msg::HalArmmotor>("/hal/armmotor",qos,std::bind(&BspCommNode::armmotor_callback, this, std::placeholders::_1));
         antenna_sub_      = this->create_subscription<hal::msg::HalAntenna>("/hal/antenna",qos,std::bind(&BspCommNode::antenna_callback, this, std::placeholders::_1));
  
         udp_ip_ = this->get_parameter("udp_ip").as_string();
