@@ -8,6 +8,7 @@
 #include "hal/msg/hal_auxithruster.hpp"
 #include "hal/msg/hal_battery.hpp"
 #include "hal/msg/hal_tailservo.hpp"
+#include "hal/msg/hal_armmotor.hpp"
 #include "hal/msg/hal_antenna.hpp"
 
 #include <arpa/inet.h>
@@ -41,6 +42,7 @@ public:
         auxithruster_sub_ = this->create_subscription<hal::msg::HalAuxithruster>("/hal/auxithruster",qos,std::bind(&BspCommNode::auxithruster_callback, this, std::placeholders::_1));
         battery_sub_      = this->create_subscription<hal::msg::HalBattery>("/hal/battery",qos,std::bind(&BspCommNode::battery_callback, this, std::placeholders::_1));
         tailservo_sub_    = this->create_subscription<hal::msg::HalTailservo>("/hal/tailservo",qos,std::bind(&BspCommNode::tailservo_callback, this, std::placeholders::_1));
+        armmotor_sub_     = this->create_subscription<uvms_msg_pkg::msg::HalArmmotor>("/hal/armmotor",qos,std::bind(&BspCommNode::armmotor_callback, this, std::placeholders::_1));
         antenna_sub_      = this->create_subscription<hal::msg::HalAntenna>("/hal/antenna",qos,std::bind(&BspCommNode::antenna_callback, this, std::placeholders::_1));
  
         udp_ip_ = this->get_parameter("udp_ip").as_string();
@@ -84,6 +86,7 @@ public:
         auxithruster_sub_.reset();
         battery_sub_.reset();
         tailservo_sub_.reset();
+        armmotor_sub_.reset();
         antenna_sub_.reset();
         timer_.reset();
 
@@ -138,6 +141,12 @@ private:
     {
         if (!active_) return;
         tailservo_data_ = *msg;
+    }
+
+    void armmotor_callback(const hal::msg::HalArmmotor::SharedPtr msg)
+    {
+        if (!active_) return;
+        armmotor_data_ = *msg;
     }
     
     void antenna_callback(const hal::msg::HalAntenna::SharedPtr msg)
@@ -277,6 +286,33 @@ private:
 
         return buf;
     }
+
+    std::vector<uint8_t> pack_armmotor(const hal::msg::HalArmmotor & msg)
+    {
+        std::vector<uint8_t> buf(sizeof(int64_t) + 10 * sizeof(int16_t) + 10 * sizeof(int16_t) + 10 * sizeof(int16_t) + 10 * sizeof(uint16_t) + 10 * sizeof(uint8_t));
+
+        uint8_t* p = buf.data();
+
+        memcpy(p, &msg.timestamp, sizeof(int64_t));
+        p += sizeof(int64_t);
+
+        memcpy(p, msg.motor_current.data(), 10 * sizeof(int16_t));
+        p += 10 * sizeof(int16_t);
+
+        memcpy(p, msg.motor_speed.data(), 10 * sizeof(int16_t));
+        p += 10 * sizeof(int16_t);
+
+        memcpy(p, msg.motor_position.data(), 10 * sizeof(int16_t));
+        p += 10 * sizeof(int16_t);
+
+        memcpy(p, msg.motor_temp.data(), 10 * sizeof(uint16_t));
+        p += 10 * sizeof(uint16_t);
+
+        memcpy(p, msg.motor_error.data(), 10 * sizeof(uint8_t));
+        p += 10 * sizeof(uint8_t);
+
+        return buf;
+    }
     
     std::vector<uint8_t> pack_antenna(const hal::msg::HalAntenna & msg)
     {
@@ -404,6 +440,22 @@ private:
     for (size_t i = 0; i < 4; ++i)
     {
         RCLCPP_INFO( this->get_logger(), "[TailServo %zu] position: %.2f", i, msg.position[i]);
+    }
+    }
+
+    void print_armmotor(const hal::msg::HalArmmotor & msg)
+    {
+    RCLCPP_INFO(this->get_logger(), "timestamp: %ld", msg.timestamp);
+
+    for (size_t i = 0; i < 10; ++i)
+    {
+        RCLCPP_INFO(this->get_logger(), "[Motor %zu] current:%d | speed:%d | position:%d | temp:%u | error:%u", i,
+            msg.motor_current[i],
+            msg.motor_speed[i],
+            msg.motor_position[i],
+            msg.motor_temp[i],
+            msg.motor_error[i]
+        );
     }
     }
     
@@ -551,6 +603,21 @@ private:
             
             sendto(sock_, packet.data(), packet.size(), 0, reinterpret_cast<struct sockaddr*>(&target_addr_), sizeof(target_addr_));
         }
+
+    // ---------- Armmotor ----------
+        if (armmotor_data_.has_value())
+        {
+            const auto & msg = armmotor_data_.value();
+            if (do_print)
+            {
+                print_armmotor(msg);
+            }
+
+            auto payload = pack_armmotor(msg);
+            auto packet = build_packet(0x03, payload);
+            
+            sendto(sock_, packet.data(), packet.size(), 0, reinterpret_cast<struct sockaddr*>(&target_addr_), sizeof(target_addr_));
+        }
         
     // ---------- Antenna ----------
         if (antenna_data_.has_value())
@@ -578,6 +645,7 @@ private:
     rclcpp::Subscription<hal::msg::HalAuxithruster>::SharedPtr auxithruster_sub_;
     rclcpp::Subscription<hal::msg::HalBattery>::SharedPtr battery_sub_;
     rclcpp::Subscription<hal::msg::HalTailservo>::SharedPtr tailservo_sub_;
+    rclcpp::Subscription<hal::msg::HalArmmotor>::SharedPtr armmotor_sub_;
     rclcpp::Subscription<hal::msg::HalAntenna>::SharedPtr antenna_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
 
@@ -588,6 +656,7 @@ private:
     std::optional<hal::msg::HalAuxithruster> auxithruster_data_;
     std::optional<hal::msg::HalBattery> battery_data_;
     std::optional<hal::msg::HalTailservo> tailservo_data_;
+    std::optional<hal::msg::HalArmmotor> armmotor_data_;
     std::optional<hal::msg::HalAntenna> antenna_data_;
 
     int sock_{-1};
