@@ -51,19 +51,20 @@ HalBinocameraNode::~HalBinocameraNode()
 
 void HalBinocameraNode::declareParameters()
 {
-  this->declare_parameter("camera_fps", 30.0);
+  this->declare_parameter("camera_fps", 10.0);
   this->declare_parameter("color_resolution", std::string("THE_800_P"));
-  this->declare_parameter("color_width", 1280);
-  this->declare_parameter("color_height", 720);
+  this->declare_parameter("color_width", 320);
+  this->declare_parameter("color_height", 320);
   this->declare_parameter("mono_resolution", std::string("THE_800_P"));
   this->declare_parameter("stereo_confidence_threshold", 200);
   this->declare_parameter("stereo_left_right_check", true);
   this->declare_parameter("stereo_extended_disparity", false);
-  this->declare_parameter("stereo_subpixel", true);
+  this->declare_parameter("stereo_subpixel", false);
   this->declare_parameter("device_mx_id", std::string(""));
-  this->declare_parameter("grab_period_ms", 33);
-  this->declare_parameter("frame_id_left", std::string("oak_rgb_camera_optical_frame"));
-  this->declare_parameter("frame_id_depth", std::string("oak_rgb_camera_optical_frame"));
+  this->declare_parameter("usb_speed", std::string("usb2"));
+  this->declare_parameter("grab_period_ms", 100);
+  this->declare_parameter("frame_id_left", std::string("oak_left_camera_optical_frame"));
+  this->declare_parameter("frame_id_depth", std::string("oak_depth_camera_optical_frame"));
 }
 
 CallbackReturn HalBinocameraNode::on_configure(const rclcpp_lifecycle::State &)
@@ -224,7 +225,7 @@ bool HalBinocameraNode::openCamera()
       this->get_parameter("stereo_extended_disparity").as_bool());
     stereo->setSubpixel(this->get_parameter("stereo_subpixel").as_bool());
     stereo->setDepthAlign(dai::CameraBoardSocket::CAM_B);
-    stereo->setOutputSize(800, 500);
+    stereo->setOutputSize(color_width, color_height);
 
     left_camera->preview.link(color_xout->input);
     left_camera->isp.link(stereo->left);
@@ -232,19 +233,31 @@ bool HalBinocameraNode::openCamera()
     stereo->depth.link(depth_xout->input);
 
     const auto mx_id = this->get_parameter("device_mx_id").as_string();
+    const auto usb_speed_str = this->get_parameter("usb_speed").as_string();
+    const auto max_usb_speed =
+      (usb_speed_str == "usb3") ? dai::UsbSpeed::SUPER : dai::UsbSpeed::HIGH;
 
     if (mx_id.empty()) {
-      pimpl_->device_ = std::make_unique<dai::Device>(pipeline);
+      pimpl_->device_ = std::make_unique<dai::Device>(pipeline, max_usb_speed);
     } else {
-      pimpl_->device_ = std::make_unique<dai::Device>(pipeline, dai::DeviceInfo(mx_id));
+      pimpl_->device_ = std::make_unique<dai::Device>(
+        pipeline,
+        dai::DeviceInfo(mx_id),
+        max_usb_speed);
     }
 
-    pimpl_->color_queue_ = pimpl_->device_->getOutputQueue(kColorStreamName, 4, false);
-    pimpl_->depth_queue_ = pimpl_->device_->getOutputQueue(kDepthStreamName, 4, false);
+    pimpl_->color_queue_ = pimpl_->device_->getOutputQueue(kColorStreamName, 2, false);
+    pimpl_->depth_queue_ = pimpl_->device_->getOutputQueue(kDepthStreamName, 2, false);
 
     grab_fail_count_ = 0;
     is_camera_open_ = true;
-    RCLCPP_INFO(this->get_logger(), "OAK-D-SR camera opened successfully.");
+    RCLCPP_INFO(
+      this->get_logger(),
+      "OAK-D-SR camera opened successfully. usb_speed=%s, preview=%dx%d, fps=%.1f",
+      usb_speed_str.c_str(),
+      color_width,
+      color_height,
+      camera_fps);
     return true;
   } catch (const std::exception & exception) {
     RCLCPP_ERROR(
