@@ -52,10 +52,10 @@ HalBinocameraNode::~HalBinocameraNode()
 void HalBinocameraNode::declareParameters()
 {
   this->declare_parameter("camera_fps", 30.0);
-  this->declare_parameter("color_resolution", std::string("THE_1080_P"));
+  this->declare_parameter("color_resolution", std::string("THE_800_P"));
   this->declare_parameter("color_width", 1280);
   this->declare_parameter("color_height", 720);
-  this->declare_parameter("mono_resolution", std::string("THE_720_P"));
+  this->declare_parameter("mono_resolution", std::string("THE_800_P"));
   this->declare_parameter("stereo_confidence_threshold", 200);
   this->declare_parameter("stereo_left_right_check", true);
   this->declare_parameter("stereo_extended_disparity", false);
@@ -171,9 +171,8 @@ bool HalBinocameraNode::openCamera()
   try {
     dai::Pipeline pipeline;
 
-    auto color_camera = pipeline.create<dai::node::ColorCamera>();
-    auto mono_left = pipeline.create<dai::node::MonoCamera>();
-    auto mono_right = pipeline.create<dai::node::MonoCamera>();
+    auto left_camera = pipeline.create<dai::node::ColorCamera>();
+    auto right_camera = pipeline.create<dai::node::ColorCamera>();
     auto stereo = pipeline.create<dai::node::StereoDepth>();
     auto color_xout = pipeline.create<dai::node::XLinkOut>();
     auto depth_xout = pipeline.create<dai::node::XLinkOut>();
@@ -185,70 +184,51 @@ bool HalBinocameraNode::openCamera()
     const auto color_height = this->get_parameter("color_height").as_int();
     const auto camera_fps = static_cast<float>(this->get_parameter("camera_fps").as_double());
 
-    color_camera->setBoardSocket(dai::CameraBoardSocket::CAM_A);
-
     const auto color_resolution_str = this->get_parameter("color_resolution").as_string();
     dai::ColorCameraProperties::SensorResolution color_resolution;
-    if (color_resolution_str == "THE_4_K") {
+    if (color_resolution_str == "THE_1080_P") {
+      color_resolution = dai::ColorCameraProperties::SensorResolution::THE_1080_P;
+    } else if (color_resolution_str == "THE_1200_P") {
+      color_resolution = dai::ColorCameraProperties::SensorResolution::THE_1200_P;
+    } else if (color_resolution_str == "THE_4_K") {
       color_resolution = dai::ColorCameraProperties::SensorResolution::THE_4_K;
-    } else if (color_resolution_str == "THE_12_MP") {
-      color_resolution = dai::ColorCameraProperties::SensorResolution::THE_12_MP;
-    } else if (color_resolution_str == "THE_13_MP") {
-      color_resolution = dai::ColorCameraProperties::SensorResolution::THE_13_MP;
     } else {
-      if (color_resolution_str != "THE_1080_P") {
+      if (color_resolution_str != "THE_800_P") {
         RCLCPP_WARN(
           this->get_logger(),
-          "Unsupported color_resolution '%s', defaulting to THE_1080_P.",
+          "Unsupported color_resolution '%s', defaulting to THE_800_P.",
           color_resolution_str.c_str());
       }
-      color_resolution = dai::ColorCameraProperties::SensorResolution::THE_1080_P;
+      color_resolution = dai::ColorCameraProperties::SensorResolution::THE_800_P;
     }
-    color_camera->setResolution(color_resolution);
 
-    color_camera->setPreviewSize(color_width, color_height);
-    color_camera->setFps(camera_fps);
-    color_camera->setInterleaved(false);
-    color_camera->setColorOrder(dai::ColorCameraProperties::ColorOrder::BGR);
+    left_camera->setBoardSocket(dai::CameraBoardSocket::CAM_B);
+    left_camera->setResolution(color_resolution);
+    left_camera->setPreviewSize(color_width, color_height);
+    left_camera->setInterleaved(false);
+    left_camera->setColorOrder(dai::ColorCameraProperties::ColorOrder::BGR);
+    left_camera->setFps(camera_fps);
 
-    mono_left->setBoardSocket(dai::CameraBoardSocket::CAM_B);
-    mono_right->setBoardSocket(dai::CameraBoardSocket::CAM_C);
+    right_camera->setBoardSocket(dai::CameraBoardSocket::CAM_C);
+    right_camera->setResolution(color_resolution);
+    right_camera->setPreviewSize(color_width, color_height);
+    right_camera->setInterleaved(false);
+    right_camera->setColorOrder(dai::ColorCameraProperties::ColorOrder::BGR);
+    right_camera->setFps(camera_fps);
 
-    const auto mono_resolution_str = this->get_parameter("mono_resolution").as_string();
-    dai::MonoCameraProperties::SensorResolution mono_resolution;
-    if (mono_resolution_str == "THE_400_P") {
-      mono_resolution = dai::MonoCameraProperties::SensorResolution::THE_400_P;
-    } else if (mono_resolution_str == "THE_480_P") {
-      mono_resolution = dai::MonoCameraProperties::SensorResolution::THE_480_P;
-    } else if (mono_resolution_str == "THE_800_P") {
-      mono_resolution = dai::MonoCameraProperties::SensorResolution::THE_800_P;
-    } else {
-      if (mono_resolution_str != "THE_720_P") {
-        RCLCPP_WARN(
-          this->get_logger(),
-          "Unsupported mono_resolution '%s', defaulting to THE_720_P.",
-          mono_resolution_str.c_str());
-      }
-      mono_resolution = dai::MonoCameraProperties::SensorResolution::THE_720_P;
-    }
-    mono_left->setResolution(mono_resolution);
-    mono_right->setResolution(mono_resolution);
-
-    mono_left->setFps(camera_fps);
-    mono_right->setFps(camera_fps);
-
+    stereo->setDefaultProfilePreset(dai::node::StereoDepth::PresetMode::HIGH_DENSITY);
     stereo->initialConfig.setConfidenceThreshold(
       this->get_parameter("stereo_confidence_threshold").as_int());
     stereo->setLeftRightCheck(this->get_parameter("stereo_left_right_check").as_bool());
     stereo->setExtendedDisparity(
       this->get_parameter("stereo_extended_disparity").as_bool());
     stereo->setSubpixel(this->get_parameter("stereo_subpixel").as_bool());
-    stereo->setDepthAlign(dai::CameraBoardSocket::CAM_A);
-    stereo->setOutputSize(color_width, color_height);
+    stereo->setDepthAlign(dai::CameraBoardSocket::CAM_B);
+    stereo->setOutputSize(800, 500);
 
-    color_camera->preview.link(color_xout->input);
-    mono_left->out.link(stereo->left);
-    mono_right->out.link(stereo->right);
+    left_camera->preview.link(color_xout->input);
+    left_camera->isp.link(stereo->left);
+    right_camera->isp.link(stereo->right);
     stereo->depth.link(depth_xout->input);
 
     const auto mx_id = this->get_parameter("device_mx_id").as_string();
