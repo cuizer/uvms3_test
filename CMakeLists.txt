@@ -49,26 +49,26 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES std_msgs builtin_interfaces
 )
 
-# add_executable(manipulator_driver
-#   src/uvms_hal_manipulator/manipulator_node.cpp
-#   src/uvms_hal_manipulator/can_driver.cpp
-#   src/uvms_hal_manipulator/protocol_parser.cpp
-#   src/uvms_hal_manipulator/safety_manager.cpp
-# )
-# ament_target_dependencies(manipulator_driver
-#   rclcpp
-#   rclcpp_lifecycle
-#   std_msgs
-#   sensor_msgs
-#   geometry_msgs
-#   trajectory_msgs
-#   lifecycle_msgs
-#   std_srvs
-# )
+add_executable(manipulator_driver
+  src/uvms_hal_manipulator/manipulator_node.cpp
+  src/uvms_hal_manipulator/can_driver.cpp
+  src/uvms_hal_manipulator/protocol_parser.cpp
+  src/uvms_hal_manipulator/safety_manager.cpp
+)
+ament_target_dependencies(manipulator_driver
+  rclcpp
+  rclcpp_lifecycle
+  std_msgs
+  sensor_msgs
+  geometry_msgs
+  trajectory_msgs
+  lifecycle_msgs
+  std_srvs
+)
 # # ==============================
 # # 【机械臂节点添加接口依赖】
 # # ==============================
-# rosidl_target_interfaces(manipulator_driver ${PROJECT_NAME} "rosidl_typesupport_cpp")
+rosidl_target_interfaces(manipulator_driver ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 # ==============================================================================
 add_executable(dual_arm_lifecycle_manager
@@ -141,7 +141,7 @@ install(TARGETS
   hal_inertialnavi_node
   hal_binocamera_node
   bsp_comm_node
-  #manipulator_driver
+  manipulator_driver
   dual_arm_lifecycle_manager
   DESTINATION lib/${PROJECT_NAME}
 )

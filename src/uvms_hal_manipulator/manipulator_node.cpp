@@ -374,110 +374,128 @@ void ManipulatorLifecycleNode::armmotor_cmd_callback(
 }
 
 void ManipulatorLifecycleNode::timer_callback()
-{
-    if (this->get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) return;
-
-    for (uint32_t id : expected_motor_ids_) {
-        CanFrame req;
-        req.can_id = id;
-        req.dlc = 5;
-        req.data[0] = 0x08;
-        req.data[1] = 0x00;
-        req.data[2] = 0x00;
-        req.data[3] = 0x00;
-        req.data[4] = 0x00;
-        can_driver_.write_frame(req);
-        std::this_thread::sleep_for(std::chrono::microseconds(200));
-    }
-
-    CanFrame frame;
-    bool received = false;
-    for (int i = 0; i < 30; i++) {
-        if (can_driver_.read_frame(frame)) {
-            received = true;
-            process_rx_frame(frame);
+        {
+            if (this->get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) return;
+        
+            for (uint32_t id : expected_motor_ids_) {
+                CanFrame req;
+                req.can_id = id;
+                req.dlc = 5;
+                req.data[0] = 0x08;
+                req.data[1] = 0x00;
+                req.data[2] = 0x00;
+                req.data[3] = 0x00;
+                req.data[4] = 0x00;
+                can_driver_.write_frame(req);
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+            }
+        
+            CanFrame frame;
+            bool received = false;
+            for (int i = 0; i < 30; i++) {
+                if (can_driver_.read_frame(frame)) {
+                    received = true;
+                    process_rx_frame(frame);
+                }
+            }
+        
+            if (received) {
+                last_rx_time_ = this->now();
+                communication_ok_ = true;
+                initial_pose_complete_ = true;
+            }
+        
+            // ===================== 【核心：发送位置指令】 =====================
+            if (control_enabled_ && communication_ok_ && !latest_joint_position_.empty())
+            {
+                // 1. 获取 ROS2 发来的弧度值
+                double target_rad = latest_joint_position_[0];
+        
+                // 2. 转成角度
+                double target_deg = target_rad * 180.0 / M_PI;
+        
+                // 3. 按你的电机协议计算位置值
+                const double reduction_ratio = 101.0;
+                int32_t send_val = (target_deg / 360.0) * reduction_ratio * 65536.0;
+        
+                // 4. 构造 CAN 指令（功能码 0x1E = 30）
+                CanFrame tx_frame;
+                tx_frame.can_id = 1;
+                tx_frame.dlc = 5;
+                tx_frame.data[0] = 0x1E;
+        
+                // 5. 正确小端字节拆分（修复！）
+                uint32_t u_val = static_cast<uint32_t>(send_val);
+                tx_frame.data[1] = (u_val >>  0) & 0xFF;
+                tx_frame.data[2] = (u_val >>  8) & 0xFF;
+                tx_frame.data[3] = (u_val >> 16) & 0xFF;
+                tx_frame.data[4] = (u_val >> 24) & 0xFF;
+        
+                // 6. 发送
+                can_driver_.write_frame(tx_frame);
+        
+                // 调试打印（看是否正确）
+                RCLCPP_INFO(get_logger(), "目标: %.2f° → 发送值: %d → 指令: 1E %02X %02X %02X %02X",
+                            target_deg, send_val,
+                            tx_frame.data[1], tx_frame.data[2], tx_frame.data[3], tx_frame.data[4]);
+            }
+        
+            // 数据上传
+            if (data_upload_enabled_ && armmotor_state_pub_) {
+                auto msg = hal::msg::HalArmmotor();
+                msg.timestamp = this->now().nanoseconds() / 1000000;
+        
+                for (int i = 0; i < 10; i++) {
+                    msg.motor_current.push_back(0);
+                    msg.motor_speed.push_back(0);
+                    msg.motor_position.push_back(0);
+                    msg.motor_temp.push_back(0);
+                    msg.motor_error.push_back(0);
+                }
+        
+                armmotor_state_pub_->publish(msg);
+            }
+        
+            publish_joint_states();
+            publish_end_effector_pose();
         }
-    }
-
-    if (received) {
-        last_rx_time_ = this->now();
-        communication_ok_ = true;
-        initial_pose_complete_ = true;
-    }
-
-    if (control_enabled_ && communication_ok_ && !latest_joint_position_.empty())
-    {
-        double target_rad = latest_joint_position_[0];
-        double target_deg = target_rad * 180.0 / M_PI;
-        const double reduction_ratio = 101.0;
-        int32_t send_val = (target_deg / 360.0) * reduction_ratio * 65536.0;
-
-        CanFrame tx_frame;
-        tx_frame.can_id = 1;
-        tx_frame.dlc = 5;
-        tx_frame.data[0] = 0x1E;
-        tx_frame.data[1] = send_val & 0xFF;
-        tx_frame.data[2] = (send_val >> 8) & 0xFF;
-        tx_frame.data[3] = (send_val >> 16) & 0xFF;
-        tx_frame.data[4] = (send_val >> 24) & 0xFF;
-
-        can_driver_.write_frame(tx_frame);
-    }
-
-    // 上位机状态上传
-    if (data_upload_enabled_ && armmotor_state_pub_) {
-        auto msg = hal::msg::HalArmmotor();
-        msg.timestamp = this->now().nanoseconds() / 1000000;
-
-        for (int i = 0; i < 10; i++) {
-            msg.motor_current.push_back(0);
-            msg.motor_speed.push_back(0);
-            msg.motor_position.push_back(0);
-            msg.motor_temp.push_back(0);
-            msg.motor_error.push_back(0);
-        }
-
-        armmotor_state_pub_->publish(msg);
-    }
-
-    publish_joint_states();
-    publish_end_effector_pose();
-}
 
 bool ManipulatorLifecycleNode::process_rx_frame(const CanFrame& frame)
-{
-    if (!is_my_motor_id(frame.can_id)) return false;
-
-    if (frame.dlc == 5 && frame.data[0] == 0x08)
-    {
-        int32_t raw = 0;
-        raw |= (uint8_t)frame.data[1];
-        raw |= (uint8_t)frame.data[2] << 8;
-        raw |= (uint8_t)frame.data[3] << 16;
-        raw |= (uint8_t)frame.data[4] << 24;
-
-        const double reduction = 101.0;
-        double angle_deg = (raw / 65536.0 / reduction) * 360.0;
-
-        int idx = -1;
-        for (int i = 0; i < (int)expected_motor_ids_.size(); ++i) {
-            if (expected_motor_ids_[i] == frame.can_id) {
-                idx = i;
-                break;
+        {
+            if (!is_my_motor_id(frame.can_id)) return false;
+        
+            if (frame.dlc == 5 && frame.data[0] == 0x08)
+            {
+                // 修复：正确解析小端
+                uint32_t raw_u = 0;
+                raw_u |= (uint8_t)frame.data[1] << 0;
+                raw_u |= (uint8_t)frame.data[2] << 8;
+                raw_u |= (uint8_t)frame.data[3] << 16;
+                raw_u |= (uint8_t)frame.data[4] << 24;
+                int32_t raw = static_cast<int32_t>(raw_u);
+        
+                const double reduction = 101.0;
+                double angle_deg = (raw / 65536.0 / reduction) * 360.0;
+        
+                int idx = -1;
+                for (int i = 0; i < (int)expected_motor_ids_.size(); ++i) {
+                    if (expected_motor_ids_[i] == frame.can_id) {
+                        idx = i;
+                        break;
+                    }
+                }
+        
+                if (idx >= 0 && idx < (int)latest_joint_position_.size()) {
+                    latest_joint_position_[idx] = angle_deg;
+                }
+        
+                motor_ready_map_[frame.can_id] = true;
+                update_initial_pose_completion();
+                return true;
             }
+        
+            return false;
         }
-
-        if (idx >= 0 && idx < (int)latest_joint_position_.size()) {
-            latest_joint_position_[idx] = angle_deg;
-        }
-
-        motor_ready_map_[frame.can_id] = true;
-        update_initial_pose_completion();
-        return true;
-    }
-
-    return false;
-}
 
 void ManipulatorLifecycleNode::publish_joint_states()
 {
