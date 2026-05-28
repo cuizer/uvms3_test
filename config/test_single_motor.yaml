@@ -8,4 +8,4 @@
     joint.position_limit_min: [-3.14]
     joint.position_limit_max: [3.14]
     joint.max_velocity: [1.0]
-    require_initial_pose_before_activate: false   # �� 改成 false
+    require_initial_pose_before_activate: false   

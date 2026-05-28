@@ -1,18 +1,11 @@
 #include "uvms_hal_manipulator/manipulator_node.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
 
-// =============================
-// 新增：上位机接口头文件
-// =============================
-#include "uvms_hal_manipulator/msg/hal_armmotor.hpp"
-#include "uvms_hal_manipulator/srv/hal_armmotor_cmd.hpp"
-
 #include <rclcpp/executors/single_threaded_executor.hpp>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <vector>
-#include <chrono>
 #include <thread>
 
 namespace uvms_hal_manipulator
@@ -75,19 +68,14 @@ auto ManipulatorLifecycleNode::on_configure(const rclcpp_lifecycle::State&) -> C
     fault_pub_ = create_publisher<std_msgs::msg::Bool>(
         "hal/manipulator/fault", rclcpp::QoS(10));
 
-    // ==============================
-    // 新增：上位机状态发布
-    // ==============================
-    armmotor_state_pub_ = create_publisher<uvms_hal_manipulator::msg::HalArmmotor>(
-        "/hal/armmotor", rclcpp::QoS(10));
+    // 上位机状态发布
+    armmotor_state_pub_ = create_publisher<hal::msg::HalArmmotor>("/hal/armmotor", rclcpp::QoS(10));
 
-    // ==============================
-    // 新增：上位机指令服务
-    // ==============================
-    armmotor_cmd_srv_ = create_service<uvms_hal_manipulator::srv/HalArmMotorCmd>(
+    // 上位机指令服务
+    armmotor_cmd_srv_ = create_service<hal::srv::HalArmmotorSrv>(
         "/hal/armmotor_cmd",
         std::bind(&ManipulatorLifecycleNode::armmotor_cmd_callback, this,
-            std::placeholders::_1, std::placeholders::_2));
+        std::placeholders::_1, std::placeholders::_2));
 
     auto period_ms = std::chrono::milliseconds(static_cast<int>(1000.0 / std::max(1.0, publish_rate_hz_)));
     timer_ = create_wall_timer(period_ms, std::bind(&ManipulatorLifecycleNode::timer_callback, this));
@@ -105,8 +93,9 @@ auto ManipulatorLifecycleNode::on_activate(const rclcpp_lifecycle::State&) -> Ca
     status_pub_->on_activate();
     fault_pub_->on_activate();
 
-    // 新增：激活上位机发布
-    if (armmotor_state_pub_) armmotor_state_pub_->on_activate();
+    if (armmotor_state_pub_) {
+        armmotor_state_pub_->on_activate();
+    }
 
     control_enabled_ = true;
     publish_status("Manipulator HAL node activated.");
@@ -122,7 +111,9 @@ auto ManipulatorLifecycleNode::on_deactivate(const rclcpp_lifecycle::State&) -> 
     if (status_pub_) status_pub_->on_deactivate();
     if (fault_pub_) fault_pub_->on_deactivate();
 
-    if (armmotor_state_pub_) armmotor_state_pub_->on_deactivate();
+    if (armmotor_state_pub_) {
+        armmotor_state_pub_->on_deactivate();
+    }
 
     control_enabled_ = false;
     return CallbackReturn::SUCCESS;
@@ -280,7 +271,6 @@ void ManipulatorLifecycleNode::reset_runtime_state()
     communication_lost_latched_ = false;
     fault_stop_requested_ = false;
 
-    // 新增：数据上传默认开启
     data_upload_enabled_ = true;
 
     build_expected_motor_id_list();
@@ -341,12 +331,10 @@ void ManipulatorLifecycleNode::emergency_stop_callback(
     res->message = "OK";
 }
 
-// ==============================
-// 新增：上位机指令解析回调
-// ==============================
+// 上位机指令回调
 void ManipulatorLifecycleNode::armmotor_cmd_callback(
-    const std::shared_ptr<uvms_hal_manipulator::srv/HalArmMotorCmd::Request> req,
-    std::shared_ptr<uvms_hal_manipulator::srv/HalArmMotorCmd::Response> res)
+    const std::shared_ptr<hal::srv::HalArmmotorSrv::Request> req,
+    std::shared_ptr<hal::srv::HalArmmotorSrv::Response> res)
 {
     uint8_t cmd = req->cmd;
     res->success = true;
@@ -436,11 +424,9 @@ void ManipulatorLifecycleNode::timer_callback()
         can_driver_.write_frame(tx_frame);
     }
 
-    // ==============================
-    // 新增：向上位机发布状态
-    // ==============================
+    // 上位机状态上传
     if (data_upload_enabled_ && armmotor_state_pub_) {
-        auto msg = uvms_hal_manipulator::msg::HalArmmotor();
+        auto msg = hal::msg::HalArmmotor();
         msg.timestamp = this->now().nanoseconds() / 1000000;
 
         for (int i = 0; i < 10; i++) {

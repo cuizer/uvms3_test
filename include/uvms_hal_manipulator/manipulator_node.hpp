@@ -4,6 +4,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <rclcpp_lifecycle/lifecycle_publisher.hpp>
+
 #include "can_driver.hpp"
 #include "protocol_parser.hpp"
 #include "safety_manager.hpp"
@@ -15,6 +16,10 @@
 #include "std_msgs/msg/bool.hpp"
 #include "std_srvs/srv/set_bool.hpp"
 
+// 上位机消息与服务（正确路径）
+#include "hal/msg/hal_armmotor.hpp"
+#include "hal/srv/hal_armmotor_srv.hpp"
+
 namespace uvms_hal_manipulator
 {
 
@@ -25,8 +30,7 @@ public:
     ~ManipulatorLifecycleNode() override = default;
 
 protected:
-    using CallbackReturn =
-        rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
+    using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
     CallbackReturn on_configure(const rclcpp_lifecycle::State& state) override;
     CallbackReturn on_activate(const rclcpp_lifecycle::State& state) override;
@@ -36,13 +40,20 @@ protected:
     CallbackReturn on_error(const rclcpp_lifecycle::State& state) override;
 
 private:
-    void joint_cmd_callback(
-        const trajectory_msgs::msg::JointTrajectoryPoint::SharedPtr msg);
+    // 原有关节指令回调
+    void joint_cmd_callback(const trajectory_msgs::msg::JointTrajectoryPoint::SharedPtr msg);
 
+    // 原有关机停止服务
     void emergency_stop_callback(
         const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
         std::shared_ptr<std_srvs::srv::SetBool::Response> response);
 
+    // ===================== 上位机指令回调（已添加）=====================
+    void armmotor_cmd_callback(
+        const std::shared_ptr<hal::srv::HalArmmotorSrv::Request> request,
+        std::shared_ptr<hal::srv::HalArmmotorSrv::Response> response);
+
+    // 定时器
     void timer_callback();
 
     void declare_and_load_parameters();
@@ -50,7 +61,6 @@ private:
     bool init_can_driver();
     void reset_runtime_state();
 
-    // 修正：双臂共用一个CAN口，用 arm_side + can_id 匹配本臂电机ID
     bool is_my_motor_id(uint32_t can_id) const;
     void build_expected_motor_id_list();
     void update_initial_pose_completion();
@@ -67,6 +77,12 @@ private:
     std::vector<double> uint16_array_to_double_vector_10(const std::array<uint16_t, 10>& arr) const;
 
 private:
+    // ===================== 上位机相关成员（已添加）=====================
+    rclcpp::Service<hal::srv::HalArmmotorSrv>::SharedPtr armmotor_cmd_srv_;
+    rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalArmmotor>::SharedPtr armmotor_state_pub_;
+    bool data_upload_enabled_{true};
+
+    // 原有成员
     std::string arm_name_;
     std::string can_interface_;
     std::string base_frame_;
