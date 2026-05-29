@@ -203,11 +203,21 @@ private:
 
     // ============================================================
     // 关节状态
+    //
+    // latest_joint_position_：电机反馈当前位置
+    // target_joint_position_：上位机/ROS 下发的目标位置
+    //
+    // 注意：
+    // 二者必须分开，否则 0x08 / 0x44 的反馈位置会覆盖目标位置，
+    // 导致电机最终下发当前位置，看起来不运动。
     // ============================================================
 
     std::vector<double> latest_joint_position_;
     std::vector<double> latest_joint_velocity_;
     std::vector<double> latest_joint_effort_;
+
+    // 新增：目标关节位置，单位 rad
+    std::vector<double> target_joint_position_;
 
     // ============================================================
     // 原有机械臂状态结构体

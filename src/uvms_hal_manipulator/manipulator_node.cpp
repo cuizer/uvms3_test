@@ -238,6 +238,7 @@ void ManipulatorLifecycleNode::reset_runtime_state()
     latest_joint_position_.assign(joint_names_.size(), 0.0);
     latest_joint_velocity_.assign(joint_names_.size(), 0.0);
     latest_joint_effort_.assign(joint_names_.size(), 0.0);
+    target_joint_position_.assign(joint_names_.size(), 0.0);
 
     initial_pose_complete_ = false;
     control_enabled_ = false;
@@ -330,7 +331,10 @@ void ManipulatorLifecycleNode::joint_cmd_callback(
         return;
     }
 
-    latest_joint_position_[0] = target;
+    target_joint_position_[0] = target;
+
+    RCLCPP_INFO(get_logger(), "✅ Joint command received: %.3f rad, %.2f deg",
+            target, target * 180.0 / M_PI);
 }
 
 void ManipulatorLifecycleNode::emergency_stop_callback(
@@ -373,12 +377,8 @@ void ManipulatorLifecycleNode::timer_callback()
         // 1.1 查询初始/当前位置：0x08
         CanFrame pos_req;
         pos_req.can_id = id;
-        pos_req.dlc = 5;
+        pos_req.dlc = 1;
         pos_req.data[0] = 0x08;
-        pos_req.data[1] = 0x00;
-        pos_req.data[2] = 0x00;
-        pos_req.data[3] = 0x00;
-        pos_req.data[4] = 0x00;
         can_driver_.write_frame(pos_req);
         std::this_thread::sleep_for(std::chrono::microseconds(200));
 
@@ -441,15 +441,17 @@ void ManipulatorLifecycleNode::timer_callback()
     // 4. 故障 -> 自动退出 activate
     // ============================================================
     if (fault_stop_requested_ && is_active) {
-        this->deactivate();
-
         auto msg_fault = std_msgs::msg::Bool();
         msg_fault.data = true;
-        fault_pub_->publish(msg_fault);
-
+    
+        if (fault_pub_) {
+            fault_pub_->publish(msg_fault);
+        }
+    
+        this->deactivate();
+    
         return;
     }
-
     // ============================================================
     // 5. 激活状态：下发位置指令
     //
@@ -462,7 +464,7 @@ void ManipulatorLifecycleNode::timer_callback()
     // ============================================================
     if (is_active && control_enabled_ && !fault_stop_requested_)
     {
-        double target_rad = latest_joint_position_[0];
+        double target_rad = target_joint_position_[0];
         double target_deg = target_rad * 180.0 / M_PI;
         const double ratio = 101.0;
 
@@ -498,10 +500,11 @@ void ManipulatorLifecycleNode::timer_callback()
     // ============================================================
     // 6. 状态上传
     // ============================================================
-    publish_joint_states();
-    publish_armmotor_state();
+    if (is_active) {
+        publish_joint_states();
+        publish_armmotor_state();
+    }
 }
-
 bool ManipulatorLifecycleNode::process_rx_frame(const CanFrame& frame)
 {
     if (!is_my_motor_id(frame.can_id)) {
@@ -660,6 +663,10 @@ void ManipulatorLifecycleNode::publish_joint_states()
         return;
     }
 
+    if (this->get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
+        return;
+    }
+
     sensor_msgs::msg::JointState msg;
     msg.header.stamp = this->now();
     msg.name = joint_names_;
@@ -672,6 +679,10 @@ void ManipulatorLifecycleNode::publish_joint_states()
 void ManipulatorLifecycleNode::publish_armmotor_state()
 {
     if (!armmotor_state_pub_ || !data_upload_enabled_) {
+        return;
+    }
+
+    if (this->get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
         return;
     }
 
