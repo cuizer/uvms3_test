@@ -21,6 +21,7 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(depthai CONFIG REQUIRED
   PATHS /home/nvidia/depthai-core/build/install/lib/cmake/depthai
+        /opt/ros/humble/lib/x86_64-linux-gnu/cmake/depthai
   NO_DEFAULT_PATH
 )
 
