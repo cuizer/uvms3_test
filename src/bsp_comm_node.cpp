@@ -1,6 +1,10 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 
+#include <sensor_msgs/msg/image.hpp>
+#include <cv_bridge/cv_bridge.h>
+#include <opencv2/opencv.hpp>
+
 #include "hal/msg/hal_inertialnavi.hpp"
 #include "hal/msg/hal_dvl.hpp"
 #include "hal/msg/hal_depthsensor.hpp"
@@ -44,6 +48,8 @@ public:
         tailservo_sub_    = this->create_subscription<hal::msg::HalTailservo>("/hal/tailservo",qos,std::bind(&BspCommNode::tailservo_callback, this, std::placeholders::_1));
         armmotor_sub_     = this->create_subscription<hal::msg::HalArmmotor>("/hal/armmotor",qos,std::bind(&BspCommNode::armmotor_callback, this, std::placeholders::_1));
         antenna_sub_      = this->create_subscription<hal::msg::HalAntenna>("/hal/antenna",qos,std::bind(&BspCommNode::antenna_callback, this, std::placeholders::_1));
+
+        color_image_sub_  = this->create_subscription<sensor_msgs::msg::Image>("/uvms/perception/image_raw",rclcpp::SensorDataQoS(),std::bind(&BspCommNode::color_image_callback, this, std::placeholders::_1));
  
         udp_ip_ = this->get_parameter("udp_ip").as_string();
         udp_port_ = this->get_parameter("udp_port").as_int();
@@ -88,7 +94,10 @@ public:
         tailservo_sub_.reset();
         armmotor_sub_.reset();
         antenna_sub_.reset();
+        color_image_sub_.reset();
         timer_.reset();
+
+        cv::destroyAllWindows();
 
         if (sock_ >= 0) {
             close(sock_);
@@ -153,6 +162,21 @@ private:
     {
         if (!active_) return;
         antenna_data_ = *msg;
+    }
+
+    void color_image_callback(const sensor_msgs::msg::Image::SharedPtr msg)
+    {
+        if (!active_) return;
+
+        try
+        {
+            cv_bridge::CvImageConstPtr cv_ptr = cv_bridge::toCvShare(msg, "bgr8");
+
+            cv::imshow("Binocular Color Image", cv_ptr->image);
+            cv::waitKey(1);
+        }
+        catch (const cv_bridge::Exception & e)
+        {RCLCPP_ERROR(this->get_logger(), "cv_bridge color error: %s", e.what());}
     }
 
 // ================= 打包函数 =================
@@ -647,6 +671,7 @@ private:
     rclcpp::Subscription<hal::msg::HalTailservo>::SharedPtr tailservo_sub_;
     rclcpp::Subscription<hal::msg::HalArmmotor>::SharedPtr armmotor_sub_;
     rclcpp::Subscription<hal::msg::HalAntenna>::SharedPtr antenna_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr color_image_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
 
     std::optional<hal::msg::HalInertialnavi> inertial_data_;
