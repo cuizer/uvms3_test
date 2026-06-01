@@ -24,6 +24,7 @@ find_package(depthai CONFIG REQUIRED
         /opt/ros/humble/lib/x86_64-linux-gnu/cmake/depthai
   NO_DEFAULT_PATH
 )
+find_package(cv_bridge REQUIRED)
 
 include_directories(include)
 
@@ -118,7 +119,7 @@ ament_target_dependencies(hal_binocamera_node
 target_link_libraries(hal_binocamera_node depthai::core)
 
 add_executable(bsp_comm_node src/bsp_comm_node.cpp)
-ament_target_dependencies(bsp_comm_node rclcpp rclcpp_lifecycle std_msgs)
+ament_target_dependencies(bsp_comm_node rclcpp rclcpp_lifecycle std_msgs cv_bridge)
 
 rosidl_target_interfaces(hal_battery_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(hal_antennacontrol_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
