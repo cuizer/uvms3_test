@@ -63,9 +63,10 @@ public:
     HalInertialNaviNode(const std::string & node_name)
     : rclcpp_lifecycle::LifecycleNode(node_name)
     {
-        this->declare_parameter<std::string>("ins_port_name", "/dev/ttyTHS0"); 
-        this->declare_parameter<std::string>("dvl_port_name", "/dev/ttyTHS1"); 
+        this->declare_parameter<std::string>("ins_port_name", "/dev/ttyTHS2"); 
+        this->declare_parameter<std::string>("dvl_port_name", "/dev/ttyTHS3"); 
         cached_msg_.timestamp = 0;
+        cached_msg_.connection_status = 0;
     }
 
     CallbackReturn on_configure(const rclcpp_lifecycle::State &) override {
@@ -118,9 +119,10 @@ private:
 
     int ins_fd_ = -1;
     int dvl_fd_ = -1;
-    
+
     std::thread ins_thread_;
     std::atomic<bool> is_running_{false};
+    std::atomic<int64_t> last_ins_data_ns_{0};
 
     void dvl_callback(const hal::msg::HalDvl::SharedPtr msg) {
         if (dvl_fd_ < 0) return; 
@@ -148,6 +150,14 @@ private:
                 std::lock_guard<std::mutex> lock(msg_mutex_);
                 msg_to_publish = cached_msg_;
             }
+
+            // 超时检测：超过 2 秒未收到惯导串口数据则上报断连
+            int64_t now_ns = this->now().nanoseconds();
+            int64_t last_ns = last_ins_data_ns_.load();
+            if (last_ns == 0 || (now_ns - last_ns) > 2000000000ULL) {
+                msg_to_publish.connection_status = 0;
+            }
+
             // 只要时间戳不为0（表示至少解析成功过一次）就发布
             if (msg_to_publish.timestamp != 0) {
                 ins_pub_->publish(msg_to_publish);
@@ -176,7 +186,9 @@ private:
             try {
                 std::lock_guard<std::mutex> lock(msg_mutex_);
                 // 优先使用接收时的系统纳秒时间戳，防止硬件时间字段解析错误导致节点不发消息
-                cached_msg_.timestamp = capture_time_ns; 
+                cached_msg_.timestamp = capture_time_ns;
+                cached_msg_.connection_status = 1;
+                last_ins_data_ns_.store(capture_time_ns); 
                 
                 // 索引建议重新核对硬件协议手册，这里沿用您的逻辑并做安全检查
                 cached_msg_.yaw       = (tokens.size() > 1) ? std::stof(tokens[1]) : 0.0f;

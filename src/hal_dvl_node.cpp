@@ -66,6 +66,7 @@ public:
     {
         this->declare_parameter<std::string>("port_name", "/dev/ttyUSB0");
         this->declare_parameter<int>("baud_rate", 115200);
+        cached_msg_.connection_status = 0;
     }
 
     CallbackReturn on_configure(const rclcpp_lifecycle::State &) override {
@@ -121,6 +122,7 @@ private:
     int serial_fd_ = -1;
     std::thread dvl_thread_;
     std::atomic<bool> is_running_{false};
+    std::atomic<int64_t> last_valid_data_ns_{0};
 
     void publish_timer_callback() {
         if (dvl_pub_->is_activated()) {
@@ -129,6 +131,14 @@ private:
                 std::lock_guard<std::mutex> lock(msg_mutex_);
                 msg_to_publish = cached_msg_;
             }
+
+            // 超时检测：超过 2 秒未收到串口数据则上报断连
+            int64_t now_ns = this->now().nanoseconds();
+            int64_t last_ns = last_valid_data_ns_.load();
+            if (last_ns == 0 || (now_ns - last_ns) > 2000000000ULL) {
+                msg_to_publish.connection_status = 0;
+            }
+
             dvl_pub_->publish(msg_to_publish);
         }
     }
@@ -188,6 +198,8 @@ private:
 
         std::lock_guard<std::mutex> lock(msg_mutex_);
         cached_msg_.timestamp = capture_time_ns;
+        cached_msg_.connection_status = 1;
+        last_valid_data_ns_.store(capture_time_ns);
 
         if (is_valid) {
             cached_msg_.velocity_x = vx;
@@ -261,7 +273,7 @@ private:
                             
                             // 放宽要求，不再强求下标0
                             if (line.find("wrx") != std::string::npos || line.find("wrz") != std::string::npos) {
-                                RCLCPP_INFO(this->get_logger(), "收到原始合法串口数据 -> %s", line.c_str());
+                                RCLCPP_DEBUG(this->get_logger(), "收到合法串口数据 -> %s", line.c_str());
                                 parse_and_cache(line, capture_time_ns); 
                             }
                         }
