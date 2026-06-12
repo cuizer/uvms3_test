@@ -16,14 +16,14 @@ class HalCanBridgeNode(Node):
         super().__init__('hal_can_bridge')
         self.get_logger().info(">>> [HAL] 正在初始化 AUV 天线 CAN 桥接器... <<<")
 
-        # 1. 初始化 SocketCAN 物理网卡 (绑定 can0)
+        # 1. 初始化 SocketCAN 物理网卡 (已修改为绑定 can3)
         try:
             # 兼容带有底层硬件环回和报错过滤的环境
-            self.bus = can.interface.Bus(channel='can0', bustype='socketcan', receive_own_messages=False)
-            self.get_logger().info(">>> [HAL] 物理网卡 can0 绑定成功！(波特率: 125k) <<<")
+            self.bus = can.interface.Bus(channel='can3', bustype='socketcan', receive_own_messages=False)
+            self.get_logger().info(">>> [HAL] 物理网卡 can3 绑定成功！(波特率: 125k) <<<")
         except Exception as e:
-            self.get_logger().error(f"【网络硬伤】无法绑定物理网卡 can0: {str(e)}")
-            self.get_logger().error("请检查是否执行了: sudo ip link set can0 up type can bitrate 125000")
+            self.get_logger().error(f"【网络硬伤】无法绑定物理网卡 can3: {str(e)}")
+            self.get_logger().error("请检查是否执行了: sudo ip link set can3 up type can bitrate 125000")
             raise e
 
         # 2. 订阅 C++ 节点发出的底层数据 (出局链路)
@@ -81,7 +81,7 @@ class HalCanBridgeNode(Node):
             
             # 记录基础调试日志
             hex_str = " ".join(f"{b:02X}" for b in raw_data)
-            self.get_logger().info(f"[TX -> can0] ID: 0x{arbitration_id:X} | 数据: [{hex_str}]")
+            self.get_logger().info(f"[TX -> can3] ID: 0x{arbitration_id:X} | 数据: [{hex_str}]")
 
         except can.CanError as e:
             self.get_logger().error(f"【硬件拒发】网卡 SocketCAN 拒绝发送报文！可能陷入 Bus-Off 或硬件短路。错误码: {str(e)}")
@@ -93,7 +93,8 @@ class HalCanBridgeNode(Node):
         底层硬件监听线程：实时读取电机回传的所有数据（RX），并无缝打包发布给 ROS 2
         """
         self.get_logger().info("[RX 线程] 底层 SocketCAN 接收监听已拉起...")
-        while rclcpp.ok():
+        # 【已修复】：将错误的 rclcpp 替换为 rclpy
+        while rclpy.ok():
             try:
                 # 阻塞式读取物理网卡报文，超时时间 0.5 秒
                 can_msg = self.bus.recv(0.5)
@@ -118,10 +119,11 @@ class HalCanBridgeNode(Node):
                 time.sleep(0.1)
 
 def main(args=None):
-    rclcpp.init(args=args)
+    # 【已修复】：将错误的 rclcpp 替换为 rclpy
+    rclpy.init(args=args)
     node = HalCanBridgeNode()
     try:
-        rclcpp.spin(node)
+        rclpy.spin(node)
     except KeyboardInterrupt:
         node.get_logger().warn(">>> [HAL] 检测到退出信号，天线桥接器正在安全关闭... <<<")
     finally:
@@ -129,7 +131,7 @@ def main(args=None):
         if hasattr(node, 'bus'):
             node.bus.shutdown()
         node.destroy_node()
-        rclcpp.shutdown()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
