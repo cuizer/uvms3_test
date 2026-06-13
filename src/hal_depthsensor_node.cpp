@@ -66,7 +66,7 @@ public:
     HalDepthSensorNode(const std::string & node_name)
     : rclcpp_lifecycle::LifecycleNode(node_name)
     {
-        this->declare_parameter<std::string>("can_interface", "can0");
+        this->declare_parameter<std::string>("can_interface", "can3");
         
         // 初始化缓存消息，防止初始时刻发送未定义的随机内存值
         cached_msg_.depth_1 = 0.0f;
