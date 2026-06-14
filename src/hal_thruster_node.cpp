@@ -55,7 +55,7 @@ public:
         timer_ = this->create_wall_timer(
             std::chrono::milliseconds(20), std::bind(&HalThrusterNode::timer_general_callback, this));
 
-        hardware_api_init_can("can0");
+        hardware_api_init_can("can2");
         return CallbackReturn::SUCCESS;
     }
 
@@ -393,7 +393,7 @@ private:
         while (keep_running_) {
             int current_fd = can_socket_.load();
             if (current_fd < 0) {
-                if (hardware_api_init_can("can0")) {
+                if (hardware_api_init_can("can2")) {
                     RCLCPP_INFO(get_logger(), "�� CAN 总线重连恢复工作！");
                 } else {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -541,7 +541,7 @@ private:
         return true;
     }
 
-    bool hardware_api_init_can(const std::string& can_iface = "can0") {
+    bool hardware_api_init_can(const std::string& can_iface = "can2") {
         if (can_socket_.load() >= 0) return true; 
 
         int fd = socket(PF_CAN, SOCK_RAW, CAN_RAW);
