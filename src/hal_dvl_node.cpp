@@ -55,7 +55,7 @@ public:
     HalDvlNode(const std::string & node_name)
     : rclcpp_lifecycle::LifecycleNode(node_name)
     {
-        this->declare_parameter<std::string>("port_name", "/dev/ttyUSB0");
+        this->declare_parameter<std::string>("port_name", "/dev/ttyUART_232_B");
         this->declare_parameter<int>("baud_rate", 115200);
         cached_msg_.connection_status = 0;
     }
@@ -313,7 +313,7 @@ private:
                             if (!line.empty() && line.back() == '\r') {
                                 line.pop_back();
                             }
-                            
+                            RCLCPP_INFO(this->get_logger(), "=== [串口原始数据捕捉] ===: '%s'", line.c_str());
                             // 【新增 4】拦截 DVL 的响应包并唤醒等待的服务线程
                             // 假设协议中 wra 代表 ACK(成功)，wrn 代表 NACK(失败/无效请求)
                             if (line.find("wra") != std::string::npos) {

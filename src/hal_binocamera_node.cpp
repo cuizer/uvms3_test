@@ -170,20 +170,39 @@ bool HalBinocameraNode::openCamera()
   closeCamera();
 
   try {
+    RCLCPP_INFO(this->get_logger(), "DepthAI step 1: start openCamera");
+
     dai::Pipeline pipeline;
 
+    RCLCPP_INFO(this->get_logger(), "DepthAI step 2a: create left_camera");
     auto left_camera = pipeline.create<dai::node::ColorCamera>();
+
+    RCLCPP_INFO(this->get_logger(), "DepthAI step 2b: create right_camera");
     auto right_camera = pipeline.create<dai::node::ColorCamera>();
+
+    RCLCPP_INFO(this->get_logger(), "DepthAI step 2c: create stereo");
     auto stereo = pipeline.create<dai::node::StereoDepth>();
+
+    RCLCPP_INFO(this->get_logger(), "DepthAI step 2d: create color_xout");
     auto color_xout = pipeline.create<dai::node::XLinkOut>();
+
+    RCLCPP_INFO(this->get_logger(), "DepthAI step 2e: create depth_xout");
     auto depth_xout = pipeline.create<dai::node::XLinkOut>();
 
+    RCLCPP_INFO(this->get_logger(), "DepthAI step 3: set stream names");
     color_xout->setStreamName(kColorStreamName);
     depth_xout->setStreamName(kDepthStreamName);
 
     const auto color_width = this->get_parameter("color_width").as_int();
     const auto color_height = this->get_parameter("color_height").as_int();
     const auto camera_fps = static_cast<float>(this->get_parameter("camera_fps").as_double());
+
+    RCLCPP_INFO(
+      this->get_logger(),
+      "DepthAI step 4: read parameters, preview=%dx%d, fps=%.1f",
+      color_width,
+      color_height,
+      camera_fps);
 
     const auto color_resolution_str = this->get_parameter("color_resolution").as_string();
     dai::ColorCameraProperties::SensorResolution color_resolution;
@@ -203,6 +222,7 @@ bool HalBinocameraNode::openCamera()
       color_resolution = dai::ColorCameraProperties::SensorResolution::THE_800_P;
     }
 
+    RCLCPP_INFO(this->get_logger(), "DepthAI step 5: configure left camera CAM_B");
     left_camera->setBoardSocket(dai::CameraBoardSocket::CAM_B);
     left_camera->setResolution(color_resolution);
     left_camera->setPreviewSize(color_width, color_height);
@@ -210,6 +230,7 @@ bool HalBinocameraNode::openCamera()
     left_camera->setColorOrder(dai::ColorCameraProperties::ColorOrder::BGR);
     left_camera->setFps(camera_fps);
 
+    RCLCPP_INFO(this->get_logger(), "DepthAI step 6: configure right camera CAM_C");
     right_camera->setBoardSocket(dai::CameraBoardSocket::CAM_C);
     right_camera->setResolution(color_resolution);
     right_camera->setPreviewSize(color_width, color_height);
@@ -217,6 +238,7 @@ bool HalBinocameraNode::openCamera()
     right_camera->setColorOrder(dai::ColorCameraProperties::ColorOrder::BGR);
     right_camera->setFps(camera_fps);
 
+    RCLCPP_INFO(this->get_logger(), "DepthAI step 7: configure stereo depth");
     stereo->setDefaultProfilePreset(dai::node::StereoDepth::PresetMode::HIGH_DENSITY);
     stereo->initialConfig.setConfidenceThreshold(
       this->get_parameter("stereo_confidence_threshold").as_int());
@@ -227,6 +249,7 @@ bool HalBinocameraNode::openCamera()
     stereo->setDepthAlign(dai::CameraBoardSocket::CAM_B);
     stereo->setOutputSize(color_width, color_height);
 
+    RCLCPP_INFO(this->get_logger(), "DepthAI step 8: link pipeline");
     left_camera->preview.link(color_xout->input);
     left_camera->isp.link(stereo->left);
     right_camera->isp.link(stereo->right);
@@ -237,6 +260,12 @@ bool HalBinocameraNode::openCamera()
     const auto max_usb_speed =
       (usb_speed_str == "usb3") ? dai::UsbSpeed::SUPER : dai::UsbSpeed::HIGH;
 
+    RCLCPP_INFO(
+      this->get_logger(),
+      "DepthAI step 9: opening device, mx_id='%s', usb_speed=%s",
+      mx_id.c_str(),
+      usb_speed_str.c_str());
+
     if (mx_id.empty()) {
       pimpl_->device_ = std::make_unique<dai::Device>(pipeline, max_usb_speed);
     } else {
@@ -246,6 +275,7 @@ bool HalBinocameraNode::openCamera()
         max_usb_speed);
     }
 
+    RCLCPP_INFO(this->get_logger(), "DepthAI step 10: device opened, getting output queues");
     pimpl_->color_queue_ = pimpl_->device_->getOutputQueue(kColorStreamName, 2, false);
     pimpl_->depth_queue_ = pimpl_->device_->getOutputQueue(kDepthStreamName, 2, false);
 

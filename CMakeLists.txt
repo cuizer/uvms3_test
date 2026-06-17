@@ -24,11 +24,10 @@ find_package(builtin_interfaces REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GPIOD REQUIRED libgpiod)
 
-# find_package(depthai CONFIG REQUIRED
-#    PATHS /home/nvidia/depthai-core/build/install/lib/cmake/depthai
-#          /opt/ros/humble/lib/x86_64-linux-gnu/cmake/depthai
-#    NO_DEFAULT_PATH
-# )
+find_package(depthai CONFIG REQUIRED
+   PATHS /home/nvidia/depthai-core/build/install/lib/cmake/depthai
+   NO_DEFAULT_PATH
+)
 find_package(cv_bridge REQUIRED)
 
 include_directories(include)
@@ -118,16 +117,19 @@ ament_target_dependencies(hal_dvl_node rclcpp rclcpp_lifecycle std_msgs std_srvs
 add_executable(hal_inertialnavi_node src/hal_inertialnavi_node.cpp)
 ament_target_dependencies(hal_inertialnavi_node rclcpp rclcpp_lifecycle std_msgs)
 
-# add_executable(hal_binocamera_node src/hal_binocamera_node.cpp)
-# ament_target_dependencies(hal_binocamera_node
-#   rclcpp
-#   rclcpp_lifecycle
-#   std_msgs
-#   sensor_msgs
-#   geometry_msgs
-#   std_srvs
-# )
-# target_link_libraries(hal_binocamera_node depthai::core)
+add_executable(hal_binocamera_node src/hal_binocamera_node.cpp)
+ament_target_dependencies(hal_binocamera_node
+  rclcpp
+  rclcpp_lifecycle
+  std_msgs
+  sensor_msgs
+  geometry_msgs
+  std_srvs
+)
+target_include_directories(hal_binocamera_node BEFORE PRIVATE
+  /home/nvidia/depthai-core/build/install/include
+)
+target_link_libraries(hal_binocamera_node depthai::core)
 
 add_executable(bsp_comm_node src/bsp_comm_node.cpp)
 ament_target_dependencies(bsp_comm_node rclcpp rclcpp_lifecycle std_msgs cv_bridge)
@@ -140,7 +142,7 @@ rosidl_target_interfaces(hal_thruster_node ${PROJECT_NAME} "rosidl_typesupport_c
 rosidl_target_interfaces(hal_depthsensor_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(hal_dvl_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(hal_inertialnavi_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
-# rosidl_target_interfaces(hal_binocamera_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
+rosidl_target_interfaces(hal_binocamera_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(bsp_comm_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 install(TARGETS
@@ -152,7 +154,7 @@ install(TARGETS
   hal_depthsensor_node
   hal_dvl_node
   hal_inertialnavi_node
-  # hal_binocamera_node
+  hal_binocamera_node
   bsp_comm_node
   manipulator_driver
   dual_arm_lifecycle_manager
