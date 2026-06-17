@@ -41,8 +41,8 @@ class HalCanBridgeNode(Node):
         self.rx_thread = threading.Thread(target=self.can_rx_loop, daemon=True)
         self.rx_thread.start()
 
-        # 5. 开启心跳定时器 (1Hz)
-        self.timer = self.create_wall_timer(1.0, self.heartbeat_callback)
+        # 5. 【已修正】：使用标准的 rclpy 定时器语法 create_timer
+        self.timer = self.create_timer(1.0, self.heartbeat_callback)
         self.get_logger().info(">>> [HAL] CAN 桥接器已就绪，双向通信链路已打通 <<<")
 
     def heartbeat_callback(self):
@@ -93,7 +93,6 @@ class HalCanBridgeNode(Node):
         底层硬件监听线程：实时读取电机回传的所有数据（RX），并无缝打包发布给 ROS 2
         """
         self.get_logger().info("[RX 线程] 底层 SocketCAN 接收监听已拉起...")
-        # 【已修复】：将错误的 rclcpp 替换为 rclpy
         while rclpy.ok():
             try:
                 # 阻塞式读取物理网卡报文，超时时间 0.5 秒
@@ -119,7 +118,6 @@ class HalCanBridgeNode(Node):
                 time.sleep(0.1)
 
 def main(args=None):
-    # 【已修复】：将错误的 rclcpp 替换为 rclpy
     rclpy.init(args=args)
     node = HalCanBridgeNode()
     try:

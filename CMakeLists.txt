@@ -19,10 +19,15 @@ find_package(trajectory_msgs REQUIRED)
 find_package(lifecycle_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(builtin_interfaces REQUIRED)
+
+# 寻找原生 GPIO 库
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GPIOD REQUIRED libgpiod)
+
 # find_package(depthai CONFIG REQUIRED
-#   PATHS /home/nvidia/depthai-core/build/install/lib/cmake/depthai
-#         /opt/ros/humble/lib/x86_64-linux-gnu/cmake/depthai
-#   NO_DEFAULT_PATH
+#    PATHS /home/nvidia/depthai-core/build/install/lib/cmake/depthai
+#          /opt/ros/humble/lib/x86_64-linux-gnu/cmake/depthai
+#    NO_DEFAULT_PATH
 # )
 find_package(cv_bridge REQUIRED)
 
@@ -89,8 +94,14 @@ ament_target_dependencies(hal_battery_node rclcpp rclcpp_lifecycle lifecycle_msg
 add_executable(hal_antennacontrol_node src/hal_antennacontrol_node.cpp)
 ament_target_dependencies(hal_antennacontrol_node rclcpp rclcpp_lifecycle lifecycle_msgs std_msgs)
 
+# ==============================================================================
+# 修改重点：灯光节点配置 (增加了 gpiod 的链接指令)
+# ==============================================================================
 add_executable(hal_lightcontrol_node src/hal_lightcontrol_node.cpp)
 ament_target_dependencies(hal_lightcontrol_node rclcpp rclcpp_lifecycle lifecycle_msgs std_msgs)
+# 强制链接 libgpiod 库！没有这句会报未定义引用错误 (undefined reference)
+target_link_libraries(hal_lightcontrol_node gpiod)
+# ==============================================================================
 
 add_executable(hal_servo_node src/hal_servo_node.cpp)
 ament_target_dependencies(hal_servo_node rclcpp rclcpp_lifecycle std_msgs)
