@@ -3,7 +3,7 @@ import time
 import threading
 
 # 注意：将其修改为 socat 输出的第二个端口名 (例如 /dev/pts/2)
-PORT = '/dev/pts/13'
+PORT = '/dev/pts/5'
 BAUDRATE = 115200
 
 try:
