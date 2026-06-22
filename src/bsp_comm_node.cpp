@@ -246,27 +246,27 @@ private:
     
     std::vector<uint8_t> pack_auxithruster(const hal::msg::HalAuxithruster & msg)
     {
-        std::vector<uint8_t> buf(sizeof(int64_t) + 6 * sizeof(int16_t) + 6 * sizeof(int16_t) + 6 * sizeof(uint16_t) + 6 * sizeof(uint8_t) + 6 * sizeof(uint8_t));
+        std::vector<uint8_t> buf(sizeof(int64_t) + 5 * sizeof(int16_t) + 5 * sizeof(int16_t) + 5 * sizeof(uint16_t) + 5 * sizeof(uint8_t) + 5 * sizeof(uint8_t));
 
         uint8_t* p = buf.data();
 
         memcpy(p, &msg.timestamp, sizeof(int64_t));
         p += sizeof(int64_t);
 
-        memcpy(p, msg.rpm.data(), 6 * sizeof(int16_t));
-        p += 6 * sizeof(int16_t);
+        memcpy(p, msg.rpm.data(), 5 * sizeof(int16_t));
+        p += 5 * sizeof(int16_t);
 
-        memcpy(p, msg.current.data(), 6 * sizeof(int16_t));
-        p += 6 * sizeof(int16_t);
+        memcpy(p, msg.current.data(), 5 * sizeof(int16_t));
+        p += 5 * sizeof(int16_t);
 
-        memcpy(p, msg.voltage.data(), 6 * sizeof(uint16_t));
-        p += 6 * sizeof(uint16_t);
+        memcpy(p, msg.voltage.data(), 5 * sizeof(uint16_t));
+        p += 5 * sizeof(uint16_t);
 
-        memcpy(p, msg.esc_status.data(), 6 * sizeof(uint8_t));
-        p += 6 * sizeof(uint8_t);
+        memcpy(p, msg.esc_status.data(), 5 * sizeof(uint8_t));
+        p += 5 * sizeof(uint8_t);
 
-        memcpy(p, msg.fault_status.data(), 6 * sizeof(uint8_t));
-        p += 6 * sizeof(uint8_t);
+        memcpy(p, msg.fault_status.data(), 5 * sizeof(uint8_t));
+        p += 5 * sizeof(uint8_t);
 
         return buf;
     }
@@ -417,7 +417,7 @@ private:
     {
     RCLCPP_INFO(this->get_logger(),"timestamp: %ld", msg.timestamp);
 
-    for (size_t i = 0; i < 6; ++i)
+    for (size_t i = 0; i < 5; ++i)
     {
     RCLCPP_INFO(this->get_logger(), "[Thruster %zu] rpm:%d | current:%d | voltage:%u | esc:%u | fault:%u", i,msg.rpm[i],msg.current[i],msg.voltage[i],msg.esc_status[i],msg.fault_status[i]);
     }

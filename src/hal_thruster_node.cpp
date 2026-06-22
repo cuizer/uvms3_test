@@ -3,7 +3,8 @@
 #include <vector>
 #include <thread>
 #include <chrono>
-#include <atomic> 
+#include <atomic>
+#include <mutex>
 #include <array>
 #include <cmath>
 #include <unistd.h>
@@ -39,8 +40,8 @@ public:
 
     CallbackReturn on_configure(const rclcpp_lifecycle::State &) override {
         RCLCPP_INFO(get_logger(), "配置中... 初始化推进器节点接口。");
-        pub_main_status_ = this->create_publisher<hal::msg::HalMainthruster>("hal_mainthruster_msg", 10);
-        pub_aux_status_ = this->create_publisher<hal::msg::HalAuxithruster>("hal_auxithruster_msg", 10);
+        pub_main_status_ = this->create_publisher<hal::msg::HalMainthruster>("/hal/mainthruster", 10);
+        pub_aux_status_ = this->create_publisher<hal::msg::HalAuxithruster>("/hal/auxithruster", 10);
 
         srv_control_ = this->create_service<hal::srv::HalThrustercontrolSrv>(
             "/hal/thrustercontrol", std::bind(&HalThrusterNode::control_srv_callback, this, _1, _2));
@@ -68,7 +69,7 @@ public:
         is_estopped_ = false; 
         is_emergency_ascending_ = false;
 
-        for (int i = 0; i < 6; ++i) {
+        for (int i = 0; i < 5; ++i) {
             aux_target_pct_[i].store(0.0);
             last_seen_ms_[i].store(0); 
         }
@@ -120,14 +121,15 @@ private:
     const uint32_t MAIN_THRUSTER_ID = 0x01; 
     const int64_t ONLINE_TIMEOUT_MS = 4000; // 2秒未收到反馈判定为离线
     
-    // 【架构修补】：实际硬件存在的 6 个辅推 ID (避开主推的 1 号 ID)
-    const std::array<uint8_t, 6> ACTIVE_AUX_IDS = {0, 2, 3, 4, 5, 6};
+    // 【架构修补】：实际硬件存在的 5 个辅推 ID (避开主推的 1 号 ID)
+    const std::array<uint8_t, 5> ACTIVE_AUX_IDS = {0, 2, 3, 4, 5};
 
     // --- 状态控制变量 ---
     std::atomic<bool> is_estopped_{false}; 
     std::atomic<bool> is_testing_{false}; 
-    std::atomic<bool> is_emergency_ascending_{false}; 
+    std::atomic<bool> is_emergency_ascending_{false};
     std::atomic<int> can_socket_{-1};
+    std::mutex can_socket_mutex_;
 
     std::thread test_thread_;
     std::thread can_rx_thread_;
@@ -139,15 +141,15 @@ private:
     std::atomic<int32_t> real_main_voltage_{0};     
     std::atomic<uint32_t> real_main_fault_{0};
     
-    // --- 数据缓存：6 路辅助推进器 (基于内部 Index = 0~5 访问) ---
-    std::array<std::atomic<double>, 6> aux_target_pct_{}; 
-    std::array<std::atomic<int16_t>, 6> aux_rpm_{};
-    std::array<std::atomic<float>, 6>   aux_current_{};
-    std::array<std::atomic<uint8_t>, 6> aux_voltage_{};
-    std::array<std::atomic<int8_t>, 6>  aux_temp_{};
-    std::array<std::atomic<uint8_t>, 6> aux_status_machine_{};
-    std::array<std::atomic<uint8_t>, 6> aux_fault_{};
-    std::array<std::atomic<int64_t>, 6> last_seen_ms_{};
+    // --- 数据缓存：5 路辅助推进器 (基于内部 Index = 0~4 访问) ---
+    std::array<std::atomic<double>, 5> aux_target_pct_{};
+    std::array<std::atomic<int16_t>, 5> aux_rpm_{};
+    std::array<std::atomic<float>, 5>   aux_current_{};
+    std::array<std::atomic<uint8_t>, 5> aux_voltage_{};
+    std::array<std::atomic<int8_t>, 5>  aux_temp_{};
+    std::array<std::atomic<uint8_t>, 5> aux_status_machine_{};
+    std::array<std::atomic<uint8_t>, 5> aux_fault_{};
+    std::array<std::atomic<int64_t>, 5> last_seen_ms_{};
 
     // --- ROS2 接口指针 ---
     std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalMainthruster>> pub_main_status_;
@@ -175,7 +177,7 @@ private:
             is_testing_ = false;   
             is_emergency_ascending_ = false;
             stop_all_thrusters();  
-            RCLCPP_FATAL(get_logger(), "�� 触发急停！已切断所有控制指令并停止所有推进器（含6路辅推）。");
+            RCLCPP_FATAL(get_logger(), "�� 触发急停！已切断所有控制指令并停止所有推进器（含5路辅推）。");
             response->success = true; response->message = "急停已激活，全系统锁定。";
         } else {
             is_estopped_ = false;
@@ -254,7 +256,7 @@ private:
         if (is_main_thruster) {
             set_thruster_rpm_hardware(MAIN_THRUSTER_ID, test_thrust_pct);
         } else {
-            for (int i = 0; i < 6; ++i) aux_target_pct_[i].store(test_thrust_pct);
+            for (int i = 0; i < 5; ++i) aux_target_pct_[i].store(test_thrust_pct);
         }
         if (!interruptible_sleep(3000)) { is_testing_ = false; return; }
 
@@ -262,7 +264,7 @@ private:
         if (is_main_thruster) {
             set_thruster_rpm_hardware(MAIN_THRUSTER_ID, -test_thrust_pct);
         } else {
-            for (int i = 0; i < 6; ++i) aux_target_pct_[i].store(-test_thrust_pct);
+            for (int i = 0; i < 5; ++i) aux_target_pct_[i].store(-test_thrust_pct);
         }
         if (!interruptible_sleep(3000)) { is_testing_ = false; return; }
 
@@ -270,7 +272,7 @@ private:
         if (is_main_thruster) {
             set_thruster_rpm_hardware(MAIN_THRUSTER_ID, 0.0);
         } else {
-            for (int i = 0; i < 6; ++i) aux_target_pct_[i].store(0.0);
+            for (int i = 0; i < 5; ++i) aux_target_pct_[i].store(0.0);
         }
         is_testing_ = false; 
     }
@@ -280,7 +282,7 @@ private:
         set_thruster_rpm_hardware(MAIN_THRUSTER_ID, 0.0);
         
         // 此处可结合 CI-AUV 的物理分布定向供能
-        for (int i = 0; i < 6; ++i) { aux_target_pct_[i].store(0.0); }
+        for (int i = 0; i < 5; ++i) { aux_target_pct_[i].store(0.0); }
         RCLCPP_FATAL(get_logger(), "[紧急上浮动作序列] 控制总线接管就绪。");
     }
 
@@ -292,15 +294,15 @@ private:
             set_thruster_rpm_hardware(MAIN_THRUSTER_ID, msg->data[0]);  
         }
 
-        // 接收话题数据 (假定 msg 中从索引 1~6 对应你的 6 个实装推进器)
-        for (size_t i = 1; i < msg->data.size() && i <= 6; ++i) {
+        // 接收话题数据 (msg 中从索引 1~5 对应 5 个实装推进器)
+        for (size_t i = 1; i < msg->data.size() && i <= 5; ++i) {
             aux_target_pct_[i - 1].store(msg->data[i]);
         }
     }
 
     void stop_all_thrusters() {
         set_thruster_rpm_hardware(MAIN_THRUSTER_ID, 0.0); 
-        for (int i = 0; i < 6; ++i) {
+        for (int i = 0; i < 5; ++i) {
             aux_target_pct_[i].store(0.0);
         }
         send_aux_control_commands();
@@ -318,9 +320,13 @@ private:
 
     // --- 精确组装辅推控制帧 (处理 ID 跳跃) ---
     void send_aux_control_commands() {
-        int fd = can_socket_.load();
-        if (fd < 0) return; 
-    
+        int fd;
+        {
+            std::lock_guard<std::mutex> lock(can_socket_mutex_);
+            fd = can_socket_.load();
+        }
+        if (fd < 0) return;
+
         for (int group = 0; group < 2; ++group) {
             struct can_frame frame;
             frame.can_id = 0x200 + group; 
@@ -356,8 +362,12 @@ private:
     }
     
     void set_thruster_rpm_hardware(uint32_t target_node_id, double thrust_percentage) {
-        int fd = can_socket_.load(); 
-        if (fd < 0) return;          
+        int fd;
+        {
+            std::lock_guard<std::mutex> lock(can_socket_mutex_);
+            fd = can_socket_.load();
+        }
+        if (fd < 0) return;
 
         if (thrust_percentage > 100.0) thrust_percentage = 100.0;
         if (thrust_percentage < -100.0) thrust_percentage = -100.0;
@@ -388,10 +398,14 @@ private:
     // --- 纯净的 50Hz 遥测数据截获 ---
     void can_receive_loop() {
         struct can_frame frame;
-        uint32_t target_main_rx_id = 0x280 + MAIN_THRUSTER_ID; 
+        uint32_t target_main_rx_id = 0x280 + MAIN_THRUSTER_ID;
 
         while (keep_running_) {
-            int current_fd = can_socket_.load();
+            int current_fd;
+            {
+                std::lock_guard<std::mutex> lock(can_socket_mutex_);
+                current_fd = can_socket_.load();
+            }
             if (current_fd < 0) {
                 if (hardware_api_init_can("can2")) {
                     RCLCPP_INFO(get_logger(), "�� CAN 总线重连恢复工作！");
@@ -400,15 +414,20 @@ private:
                 }
                 continue;
             }
-            
+
             ssize_t nbytes = recv(current_fd, &frame, sizeof(struct can_frame), 0);
-            
+
             if (nbytes < 0) {
                 if (errno == ENETDOWN || errno == ENODEV || errno == EBADF) {
-                    hardware_api_close_can(); 
-                    std::this_thread::sleep_for(std::chrono::seconds(1)); 
+                    // 仅在 current_fd 仍是当前 socket 时才关闭，防止误关新 socket
+                    std::lock_guard<std::mutex> lock(can_socket_mutex_);
+                    if (can_socket_.load() == current_fd) {
+                        int old_fd = can_socket_.exchange(-1);
+                        if (old_fd >= 0) { ::close(old_fd); }
+                    }
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
                 }
-                continue; 
+                continue;
             }
 
             if (nbytes == sizeof(struct can_frame)) {
@@ -497,7 +516,7 @@ private:
         int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
 
-        for (int i = 0; i < 6; ++i) {
+        for (int i = 0; i < 5; ++i) {
             int64_t last_seen = last_seen_ms_[i].load();
             bool is_online = (last_seen != 0) && ((now_ms - last_seen) < ONLINE_TIMEOUT_MS);
 
@@ -517,7 +536,11 @@ private:
     }
 
     void request_thruster_status(uint32_t target_node_id, uint8_t cmd_byte1, uint8_t cmd_byte2) {
-        int fd = can_socket_.load();
+        int fd;
+        {
+            std::lock_guard<std::mutex> lock(can_socket_mutex_);
+            fd = can_socket_.load();
+        }
         if (fd < 0) return;
         
         struct can_frame frame;
@@ -542,36 +565,46 @@ private:
     }
 
     bool hardware_api_init_can(const std::string& can_iface = "can2") {
-        if (can_socket_.load() >= 0) return true; 
+        {
+            std::lock_guard<std::mutex> lock(can_socket_mutex_);
+            if (can_socket_.load() >= 0) return true;
+        }
 
         int fd = socket(PF_CAN, SOCK_RAW, CAN_RAW);
         if (fd < 0) return false;
-        
+
         struct ifreq ifr;
         std::strncpy(ifr.ifr_name, can_iface.c_str(), IFNAMSIZ - 1);
         ifr.ifr_name[IFNAMSIZ - 1] = '\0';
         if (ioctl(fd, SIOCGIFINDEX, &ifr) < 0) { close(fd); return false; }
-        
+
         struct timeval tv;
-        tv.tv_sec = 0; tv.tv_usec = 50000; 
+        tv.tv_sec = 0; tv.tv_usec = 50000;
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
         struct sockaddr_can addr;
-        addr.can_family = AF_CAN; 
+        addr.can_family = AF_CAN;
         addr.can_ifindex = ifr.ifr_ifindex;
-        
-        if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) { 
-            close(fd); return false; 
+
+        if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            close(fd); return false;
         }
 
-        can_socket_.store(fd);
+        {
+            std::lock_guard<std::mutex> lock(can_socket_mutex_);
+            can_socket_.store(fd);
+        }
         RCLCPP_INFO(get_logger(), "✅ SocketCAN 接口 %s 初始化成功！", can_iface.c_str());
         return true;
     }
 
-    void hardware_api_close_can() { 
-        int fd = can_socket_.exchange(-1);
-        if (fd >= 0) { close(fd); } 
+    void hardware_api_close_can() {
+        int fd;
+        {
+            std::lock_guard<std::mutex> lock(can_socket_mutex_);
+            fd = can_socket_.exchange(-1);
+        }
+        if (fd >= 0) { close(fd); }
     }
 };
 
