@@ -1,18 +1,20 @@
-/right_arm:
+/right_arm/manipulator_driver:
   ros__parameters:
     arm_name: right_arm
     can_interface: can0
     arm_side: right
+
     require_initial_pose_before_activate: true
     fault_stop_on_comm_loss: true
+
     base_frame: right_arm_base
     ee_frame: right_gripper_link
-    debug_mode: true  # 生产环境改为false
+
+    debug_mode: true
     publish_rate_hz: 50.0
 
-    # ======================
-    # 改成 5 个关节（电机）
-    # ======================
+    motor_can_ids: [2, 4, 6, 8, 10]
+
     joint_names:
       - right_joint_1
       - right_joint_2
@@ -20,16 +22,10 @@
       - right_joint_4
       - right_joint_5
 
-    # ==============================
-    # 5 个关节对应的位置限制 + 速度
-    # ==============================
     joint.position_limit_min: [-3.14, -2.50, -2.50, -3.14, -1.57]
     joint.position_limit_max: [ 3.14,  2.50,  2.50,  3.14,  1.57]
     joint.max_velocity:       [ 1.50,  1.50,  1.50,  1.50,  1.00]
 
-    # ======================
-    # 5 个减速比 101
-    # ======================
     joint.gear_ratios: [101.0, 101.0, 101.0, 101.0, 101.0]
 
     safety.max_current: 500.0

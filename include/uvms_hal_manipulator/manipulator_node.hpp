@@ -231,6 +231,18 @@ private:
     // 机械臂侧别与生命周期控制状态
     // ============================================================
 
+    // ============================================================
+    //  CAN 查询降频控制
+    // ============================================================
+
+    rclcpp::Time last_position_query_time_;
+    rclcpp::Time last_error_query_time_;
+    rclcpp::Time last_temp_query_time_;
+    
+    double position_query_period_sec_{0.5};  // 每 500ms 查询一次所有电机位置
+    double error_query_period_sec_{2.0};     // 每 2s 查询一次所有电机错误
+    double temp_query_period_sec_{2.0};      // 每 2s 查询一次所有电机温度
+
     std::string arm_side_;
 
     bool require_initial_pose_before_activate_{true};
@@ -240,7 +252,8 @@ private:
     // ============================================================
     // 电机 ID 与初始化状态
     // ============================================================
-
+    std::vector<int64_t> motor_can_ids_param_;
+    std::map<uint32_t, size_t> motor_id_to_joint_index_;
     std::vector<uint32_t> expected_motor_ids_;
 
     // 每个电机是否已经收到过初始位置
@@ -269,6 +282,14 @@ private:
     // 电机协议返回的错误状态是 int32_t / uint32_t，
     // 后续发布到 byte[] motor_error 时，在 cpp 中压缩成 8 位。
     std::map<uint32_t, uint32_t> latest_motor_error_;
+
+// 用于判断 HAL 层和该电机之间是否通信丢失。
+    std::map<uint32_t, rclcpp::Time> latest_motor_rx_time_;
+
+// 每个电机的 HAL 通信状态。
+// 0：HAL 与该电机通信正常
+// 1：HAL 与该电机通信丢失
+    std::map<uint32_t, uint8_t> latest_motor_comm_error_;
 
     // ============================================================
     // 日志防刷屏标志

@@ -203,6 +203,7 @@ private:
                 // 如果抛出异常，说明某个字段的数据不是合法数字
                 RCLCPP_ERROR(this->get_logger(), "【探针4】致命错误：数据类型转换失败: %s", e.what());
             }
+        }
         // } else {
         //     RCLCPP_WARN(this->get_logger(), "【探针】切分的字段数量不足！实际数量: %zu", tokens.size());
         // }

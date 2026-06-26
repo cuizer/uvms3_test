@@ -20,14 +20,14 @@ find_package(lifecycle_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 
-# 寻找原生 GPIO 库
+# rss封控寻找原生 GPIO 库
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GPIOD REQUIRED libgpiod)
 
-# find_package(depthai CONFIG REQUIRED
-#    PATHS /home/nvidia/depthai-core/build/install/lib/cmake/depthai
-#    NO_DEFAULT_PATH
-# )
+find_package(depthai CONFIG REQUIRED
+   PATHS /home/nvidia/depthai-core/build/install/lib/cmake/depthai
+   NO_DEFAULT_PATH
+)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
 
@@ -74,10 +74,7 @@ ament_target_dependencies(manipulator_driver
 )
 # # ==============================
 # # 【机械臂节点添加接口依赖】
-# # ==============================
 rosidl_target_interfaces(manipulator_driver ${PROJECT_NAME} "rosidl_typesupport_cpp")
-
-# ==============================================================================
 add_executable(dual_arm_lifecycle_manager
   src/uvms_hal_manipulator/dual_arm_manager.cpp
 )
@@ -86,6 +83,27 @@ ament_target_dependencies(dual_arm_lifecycle_manager
   std_msgs
   lifecycle_msgs
 )
+
+add_executable(armmotor
+  src/uvms_hal_manipulator/armmotor.cpp
+)
+
+ament_target_dependencies(armmotor
+  rclcpp
+)
+
+rosidl_target_interfaces(armmotor ${PROJECT_NAME} "rosidl_typesupport_cpp")
+
+add_executable(bsp_arm_trajectory_node
+  src/uvms_hal_manipulator/bsp_arm_trajectory_node.cpp
+)
+
+ament_target_dependencies(bsp_arm_trajectory_node
+  rclcpp
+  sensor_msgs
+  trajectory_msgs
+)
+
 # ==============================================================================
 
 add_executable(hal_battery_node src/hal_battery_node.cpp)
@@ -95,7 +113,7 @@ add_executable(hal_antennacontrol_node src/hal_antennacontrol_node.cpp)
 ament_target_dependencies(hal_antennacontrol_node rclcpp rclcpp_lifecycle lifecycle_msgs std_msgs)
 
 # ==============================================================================
-# 修改重点：灯光节点配置 (增加了 gpiod 的链接指令)
+# 修改重点：灯光节点配置 (增加了 gpiod 的链接指令)rss封印
 # ==============================================================================
 add_executable(hal_lightcontrol_node src/hal_lightcontrol_node.cpp)
 ament_target_dependencies(hal_lightcontrol_node rclcpp rclcpp_lifecycle lifecycle_msgs std_msgs)
@@ -141,7 +159,7 @@ ament_target_dependencies(bsp_motioncontrol_node rclcpp rclcpp_lifecycle std_msg
 
 rosidl_target_interfaces(hal_battery_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(hal_antennacontrol_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
-rosidl_target_interfaces(hal_lightcontrol_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
+rssrosidl_target_interfaces(hal_lightcontrol_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(hal_servo_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(hal_thruster_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(hal_depthsensor_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
@@ -165,6 +183,8 @@ install(TARGETS
   bsp_motioncontrol_node
   manipulator_driver
   dual_arm_lifecycle_manager
+  armmotor
+  bsp_arm_trajectory_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
