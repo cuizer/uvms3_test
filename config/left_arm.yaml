@@ -1,14 +1,19 @@
-/left_arm:
+/left_arm/manipulator_driver:
   ros__parameters:
     arm_name: left_arm
     can_interface: can0
     arm_side: left
+
     require_initial_pose_before_activate: true
     fault_stop_on_comm_loss: true
+
     base_frame: left_arm_base
     ee_frame: left_gripper_link
-    debug_mode: true  # 生产环境改为false
+
+    debug_mode: true
     publish_rate_hz: 50.0
+
+    motor_can_ids: [1, 3, 5, 7, 9]
 
     joint_names:
       - left_joint_1
@@ -17,14 +22,10 @@
       - left_joint_4
       - left_joint_5
 
-    # ✅ 修正：补充第5个关节的限位值（请根据实际机械参数调整）
     joint.position_limit_min: [-3.14, -2.50, -2.50, 0.00, -1.57]
     joint.position_limit_max: [ 3.14,  2.50,  2.50, 1.00,  1.57]
     joint.max_velocity:       [ 1.50,  1.50,  1.50, 1.00,  1.00]
 
-    # ✅ 新增：显式指定减速比为101（与电机参数一致）
-    joint.gear_ratios: [101.0, 101.0, 101.0, 101.0, 101.0]
-
     safety.max_current: 500.0
     safety.max_temperature: 100.0
-    safety.communication_timeout_sec: 0.2
+    safety.communication_timeout_sec: 0.5

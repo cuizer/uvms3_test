@@ -52,6 +52,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/HalbinocameraSrv.srv"
   "msg/HalArmmotor.msg"
   "srv/HalArmmotorSrv.srv"
+   "msg/CanFrameManipulator.msg"
 
   DEPENDENCIES std_msgs builtin_interfaces
 )
@@ -104,6 +105,19 @@ ament_target_dependencies(bsp_arm_trajectory_node
   trajectory_msgs
 )
 
+add_executable(can_manager
+  src/uvms_hal_manipulator/can_manager_node.cpp
+  src/uvms_hal_manipulator/can_driver.cpp
+)
+
+ament_target_dependencies(can_manager
+  rclcpp
+  std_msgs
+  builtin_interfaces
+)
+
+rosidl_target_interfaces(can_manager ${PROJECT_NAME} "rosidl_typesupport_cpp")
+
 # ==============================================================================
 
 add_executable(hal_battery_node src/hal_battery_node.cpp)
@@ -113,7 +127,7 @@ add_executable(hal_antennacontrol_node src/hal_antennacontrol_node.cpp)
 ament_target_dependencies(hal_antennacontrol_node rclcpp rclcpp_lifecycle lifecycle_msgs std_msgs)
 
 # ==============================================================================
-# 修改重点：灯光节点配置 (增加了 gpiod 的链接指令)rss封印
+# rss修改重点：灯光节点配置 (增加了 gpiod 的链接指令)rss封印
 # ==============================================================================
 add_executable(hal_lightcontrol_node src/hal_lightcontrol_node.cpp)
 ament_target_dependencies(hal_lightcontrol_node rclcpp rclcpp_lifecycle lifecycle_msgs std_msgs)
@@ -159,7 +173,7 @@ ament_target_dependencies(bsp_motioncontrol_node rclcpp rclcpp_lifecycle std_msg
 
 rosidl_target_interfaces(hal_battery_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(hal_antennacontrol_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
-rssrosidl_target_interfaces(hal_lightcontrol_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
+rosidl_target_interfaces(hal_lightcontrol_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(hal_servo_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(hal_thruster_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(hal_depthsensor_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
@@ -185,6 +199,7 @@ install(TARGETS
   dual_arm_lifecycle_manager
   armmotor
   bsp_arm_trajectory_node
+  can_manager
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -10,6 +10,8 @@
 #include <map>
 #include <iostream>
 #include <cstdint>
+#include <array>
+#include "hal/msg/can_frame_manipulator.hpp"
 
 namespace uvms_hal_manipulator
 {
@@ -43,12 +45,25 @@ auto ManipulatorLifecycleNode::on_configure(const rclcpp_lifecycle::State&) -> C
         return CallbackReturn::FAILURE;
     }
 
-    if (!init_can_driver()) {
-        RCLCPP_ERROR(get_logger(), "Failed to initialize CAN driver.");
-        return CallbackReturn::FAILURE;
-    }
-
     reset_runtime_state();
+
+    // ============================================================
+    // CAN manager 架构：
+    // manipulator_driver 不再直接 open/read/write can0。
+    // CAN 请求统一发布到 /hal/can_tx。
+    // CAN 反馈统一订阅 /hal/can_rx。
+    // ============================================================
+    can_tx_pub_ = create_publisher<hal::msg::CanFrameManipulator>(
+        "/hal/can_tx",
+        rclcpp::QoS(200));
+
+    using std::placeholders::_1;
+
+    can_rx_sub_ = this->create_subscription<hal::msg::CanFrameManipulator>(
+        "/hal/can_rx",
+        rclcpp::QoS(10),
+        std::bind(&ManipulatorLifecycleNode::can_rx_callback, this, _1)
+    );
 
     joint_cmd_sub_ = create_subscription<trajectory_msgs::msg::JointTrajectoryPoint>(
         "hal/manipulator/joint_cmd",
@@ -72,24 +87,13 @@ auto ManipulatorLifecycleNode::on_configure(const rclcpp_lifecycle::State&) -> C
     fault_pub_ = create_publisher<std_msgs::msg::Bool>(
         "hal/manipulator/fault", rclcpp::QoS(10));
 
-    // 注意：
-    // 这里不要使用绝对话题 "/hal/armmotor"。
-    // 如果使用绝对话题，左右臂两个节点都会发布到同一个话题，容易混乱。
-    //
-    // 使用相对话题后：
-    // 左臂节点实际话题：/left_arm/hal/armmotor
-    // 右臂节点实际话题：/right_arm/hal/armmotor
     armmotor_state_pub_ = create_publisher<hal::msg::HalArmmotor>(
         "hal/armmotor", rclcpp::QoS(10));
 
-    // 同理，不建议左右臂同时创建同一个绝对服务 "/hal/armmotor_cmd"。
-    // 使用相对服务后：
-    // 左臂服务：/left_arm/hal/armmotor_cmd
-    // 右臂服务：/right_arm/hal/armmotor_cmd
     armmotor_cmd_srv_ = create_service<hal::srv::HalArmmotorSrv>(
         "hal/armmotor_cmd",
         std::bind(&ManipulatorLifecycleNode::armmotor_cmd_callback, this,
-        std::placeholders::_1, std::placeholders::_2));
+                  std::placeholders::_1, std::placeholders::_2));
 
     auto period_ms = std::chrono::milliseconds(
         static_cast<int>(1000.0 / std::max(1.0, publish_rate_hz_)));
@@ -120,8 +124,32 @@ auto ManipulatorLifecycleNode::on_activate(const rclcpp_lifecycle::State&) -> Ca
         armmotor_state_pub_->on_activate();
     }
 
+    if (latest_joint_position_.size() == joint_names_.size()) {
+        target_joint_position_ = latest_joint_position_;
+
+        RCLCPP_INFO(get_logger(), "Initialize target position with current joint position.");
+
+        for (size_t i = 0; i < joint_names_.size(); ++i) {
+            RCLCPP_INFO(
+                get_logger(),
+                "  hold %s: %.3f rad, %.2f deg",
+                joint_names_[i].c_str(),
+                target_joint_position_[i],
+                target_joint_position_[i] * 180.0 / M_PI);
+        }
+    } else {
+        RCLCPP_ERROR(
+            get_logger(),
+            "Cannot activate: latest_joint_position_ size (%zu) != joint_names size (%zu).",
+            latest_joint_position_.size(),
+            joint_names_.size());
+        return CallbackReturn::FAILURE;
+    }
+
     control_enabled_ = true;
     fault_stop_requested_ = false;
+    send_position_log_printed_ = false;
+
     publish_status("Manipulator activated.");
 
     return CallbackReturn::SUCCESS;
@@ -159,7 +187,9 @@ auto ManipulatorLifecycleNode::on_cleanup(const rclcpp_lifecycle::State&) -> Cal
     fault_pub_.reset();
     armmotor_state_pub_.reset();
 
-    can_driver_.close();
+    can_tx_pub_.reset();
+    can_rx_sub_.reset();
+
     reset_runtime_state();
 
     return CallbackReturn::SUCCESS;
@@ -168,15 +198,45 @@ auto ManipulatorLifecycleNode::on_cleanup(const rclcpp_lifecycle::State&) -> Cal
 auto ManipulatorLifecycleNode::on_shutdown(const rclcpp_lifecycle::State&) -> CallbackReturn
 {
     RCLCPP_INFO(get_logger(), "[%s] on_shutdown()", get_name());
-    can_driver_.close();
+    // can_driver_.close();
     return CallbackReturn::SUCCESS;
 }
 
 auto ManipulatorLifecycleNode::on_error(const rclcpp_lifecycle::State&) -> CallbackReturn
 {
     RCLCPP_ERROR(get_logger(), "[%s] on_error()", get_name());
-    can_driver_.close();
     return CallbackReturn::SUCCESS;
+}
+
+void ManipulatorLifecycleNode::publish_can_frame(
+    uint32_t can_id,
+    uint8_t dlc,
+    const std::array<uint8_t, 8>& data,
+    uint8_t priority,
+    const std::string& frame_type)
+{
+    if (!can_tx_pub_) {
+        RCLCPP_WARN_THROTTLE(
+            get_logger(),
+            *get_clock(),
+            2000,
+            "CAN tx publisher is not initialized.");
+        return;
+    }
+
+    hal::msg::CanFrameManipulator msg;
+    msg.stamp = this->now();
+    msg.can_id = can_id;
+    msg.dlc = dlc;
+    msg.priority = priority;
+    msg.source = arm_side_;
+    msg.frame_type = frame_type;
+
+    for (size_t i = 0; i < 8; ++i) {
+        msg.data[i] = data[i];
+    }
+
+    can_tx_pub_->publish(msg);
 }
 
 void ManipulatorLifecycleNode::declare_and_load_parameters()
@@ -395,17 +455,6 @@ bool ManipulatorLifecycleNode::init_safety_config()
     return true;
 }
 
-bool ManipulatorLifecycleNode::init_can_driver()
-{
-    if (!can_driver_.open(can_interface_)) {
-        return false;
-    }
-
-    can_driver_.flush();
-
-    RCLCPP_INFO(get_logger(), "CAN interface opened: %s", can_interface_.c_str());
-    return true;
-}
 
 void ManipulatorLifecycleNode::reset_runtime_state()
 {
@@ -703,68 +752,39 @@ void ManipulatorLifecycleNode::armmotor_cmd_callback(
 void ManipulatorLifecycleNode::timer_callback()
 {
     auto now = this->now();
+
     bool is_active =
         (this->get_current_state().id() == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
 
-    // 1. 初始化/状态查询阶段
-    //
-    // 0x08：继续用于读取初始/当前位置
-    // 0x0A：获取电机错误状态
-    // 0x31：获取电机温度，十进制 49
-
     // ============================================================
-    // for (uint32_t id : expected_motor_ids_) {
-    //     // 1.1 查询初始/当前位置：0x08
-    //     CanFrame pos_req;
-    //     pos_req.can_id = id;
-    //     pos_req.dlc = 1;
-    //     pos_req.data[0] = 0x08;
-    //     can_driver_.write_frame(pos_req);
-    //     std::this_thread::sleep_for(std::chrono::microseconds(200));
-
-    //     // 1.2 查询错误状态：十进制 10 = 0x0A
-    //     CanFrame err_req;
-    //     err_req.can_id = id;
-    //     err_req.dlc = 1;
-    //     err_req.data[0] = 0x0A;
-    //     can_driver_.write_frame(err_req);
-    //     std::this_thread::sleep_for(std::chrono::microseconds(200));
-
-    //     // 1.3 查询电机温度：十进制 49 = 0x31
-    //     CanFrame temp_req;
-    //     temp_req.can_id = id;
-    //     temp_req.dlc = 1;
-    //     temp_req.data[0] = 0x31;
-    //     can_driver_.write_frame(temp_req);
-    //     std::this_thread::sleep_for(std::chrono::microseconds(200));
-    // }
-    // 新逻辑：
-// 0x08 位置查询：每 500ms 查询一次本臂所有电机。
-// 0x0A 错误查询：每 2s 查询一次本臂所有电机。
-// 0x31 温度查询：每 2s 查询一次本臂所有电机。
-// ============================================================
-
+    // 1. 状态查询请求
+    //
+    // 注意：
+    // manipulator_driver 不再直接 write can0。
+    // 这里只是把 CAN 请求发布到 /hal/can_tx。
+    // 真正的 can0 写入由 can_manager 统一排队、限频、发送。
+    //
+    // 0x08：每 500ms 查询一次本臂所有电机位置
+    // 0x0A：每 2s 查询一次本臂所有电机错误状态
+    // 0x31：每 2s 查询一次本臂所有电机温度
+    // ============================================================
     double dt_pos = (now - last_position_query_time_).seconds();
     double dt_err = (now - last_error_query_time_).seconds();
     double dt_temp = (now - last_temp_query_time_).seconds();
 
     if (dt_pos >= position_query_period_sec_) {
         for (uint32_t id : expected_motor_ids_) {
-            CanFrame pos_req;
-            pos_req.can_id = id;
-            pos_req.dlc = 1;
-            pos_req.data[0] = 0x08;
+            std::array<uint8_t, 8> data{};
+            data[0] = 0x08;
 
-            if (!can_driver_.write_frame(pos_req)) {
-                RCLCPP_WARN_THROTTLE(
-                get_logger(),
-                    *get_clock(),
-                    2000,
-                    "Failed to write position query frame 0x08 to motor %u.",
-                    id);
-            }
-    
-            std::this_thread::sleep_for(std::chrono::microseconds(200));
+            publish_can_frame(
+                id,
+                1,
+                data,
+                2,
+                "query_position");
+
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
 
         last_position_query_time_ = now;
@@ -772,21 +792,17 @@ void ManipulatorLifecycleNode::timer_callback()
 
     if (dt_err >= error_query_period_sec_) {
         for (uint32_t id : expected_motor_ids_) {
-            CanFrame err_req;
-            err_req.can_id = id;
-            err_req.dlc = 1;
-            err_req.data[0] = 0x0A;
+            std::array<uint8_t, 8> data{};
+            data[0] = 0x0A;
 
-            if (!can_driver_.write_frame(err_req)) {
-                RCLCPP_WARN_THROTTLE(
-                    get_logger(),
-                        *get_clock(),
-                    2000,
-                    "Failed to write error query frame 0x0A to motor %u.",
-                    id);
-            }
+            publish_can_frame(
+                id,
+                1,
+                data,
+                3,
+                "query_error");
 
-            std::this_thread::sleep_for(std::chrono::microseconds(200));
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
 
         last_error_query_time_ = now;
@@ -794,57 +810,34 @@ void ManipulatorLifecycleNode::timer_callback()
 
     if (dt_temp >= temp_query_period_sec_) {
         for (uint32_t id : expected_motor_ids_) {
-            CanFrame temp_req;
-            temp_req.can_id = id;
-            temp_req.dlc = 1;
-            temp_req.data[0] = 0x31;
+            std::array<uint8_t, 8> data{};
+            data[0] = 0x31;
 
-            if (!can_driver_.write_frame(temp_req)) {
-                RCLCPP_WARN_THROTTLE(
-                    get_logger(),
-                    *get_clock(),
-                    2000,
-                    "Failed to write temperature query frame 0x31 to motor %u.",
-                    id);
-            }
+            publish_can_frame(
+                id,
+                1,
+                data,
+                4,
+                "query_temp");
 
-            std::this_thread::sleep_for(std::chrono::microseconds(200));
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
 
         last_temp_query_time_ = now;
     }
 
     // ============================================================
-    // 2. 接收并解析所有 CAN 帧
+    // 2. 每个电机 HAL 通信状态判断
+    //
+    // latest_motor_rx_time_ 不再由 timer_callback 里的 read_frame 更新，
+    // 而是由 can_rx_callback() 接收到 /hal/can_rx 后更新。
     // ============================================================
-    bool received_valid = false;
-    CanFrame frame;
+    bool any_motor_ok = false;
 
-    for (int i = 0; i < 50; i++) {
-        if (can_driver_.read_frame(frame)) {
-            if (process_rx_frame(frame)) {
-                received_valid = true;
-            }
-        }
-    }
-
-    if (received_valid) {
-        last_rx_time_ = now;
-        communication_ok_ = true;
-        communication_lost_latched_ = false;
-    } else {
-        communication_ok_ = false;
-    }
-
-    // ============================================================
-    // 3. 每个电机 HAL 通信状态判断
-    // 判断 HAL 层是否还能收到每个电机的反馈。
-    // ============================================================
     for (uint32_t id : expected_motor_ids_) {
         auto it = latest_motor_rx_time_.find(id);
 
         if (it == latest_motor_rx_time_.end()) {
-            // 没有该电机的接收时间记录，认为通信异常
             latest_motor_comm_error_[id] = 1;
             continue;
         }
@@ -855,26 +848,35 @@ void ManipulatorLifecycleNode::timer_callback()
             latest_motor_comm_error_[id] = 1;
         } else {
             latest_motor_comm_error_[id] = 0;
+            any_motor_ok = true;
         }
     }
 
+    communication_ok_ = any_motor_ok;
+
     // ============================================================
-    // 4. 安全监控：通信超时
-    // latest_motor_comm_error_：用于上位机查看每个电机通信状态
-    // fault_stop_requested_：用于 HAL 内部触发故障停机
+    // 3. 安全监控：通信超时
+    //
+    // last_rx_time_ 由 can_rx_callback() 更新。
+    // 如果 active 后长时间没有收到本臂任意电机反馈，则触发 fault stop。
     // ============================================================
     if (is_active && fault_stop_on_comm_loss_) {
         double dt = (now - last_rx_time_).seconds();
 
         if (dt > comm_timeout_sec_) {
-            RCLCPP_ERROR(get_logger(), "❌ Communication lost -> fault stop");
+            RCLCPP_ERROR_THROTTLE(
+                get_logger(),
+                *get_clock(),
+                2000,
+                "❌ Communication lost -> fault stop");
+
             fault_stop_requested_ = true;
             control_enabled_ = false;
         }
     }
 
     // ============================================================
-    // 5. 故障 -> 自动退出 activate
+    // 4. 故障 -> 自动退出 activate
     // ============================================================
     if (fault_stop_requested_ && is_active) {
         auto msg_fault = std_msgs::msg::Bool();
@@ -885,23 +887,21 @@ void ManipulatorLifecycleNode::timer_callback()
         }
 
         this->deactivate();
-
         return;
     }
 
     // ============================================================
-    // 6. 激活状态：下发位置指令
+    // 5. active 状态：发布 0x44 位置控制请求
     //
-    // 新协议：
-    // 0x44，十进制 68
-    // 功能：设置位置并获取电流、速度、位置
+    // 这里也不再直接 write can0。
+    // 只发布到 /hal/can_tx。
+    // can_manager 会对同一 can_id 的 0x44 控制帧只保留最新目标。
     //
     // 发送格式：
     // data[0] = 0x44
     // data[1-4] = 目标位置，小端序
     // ============================================================
-    if (is_active && control_enabled_ && !fault_stop_requested_)
-    {
+    if (is_active && control_enabled_ && !fault_stop_requested_) {
         if (target_joint_position_.size() < expected_motor_ids_.size()) {
             RCLCPP_ERROR(
                 get_logger(),
@@ -924,30 +924,34 @@ void ManipulatorLifecycleNode::timer_callback()
 
             uint32_t u_val = static_cast<uint32_t>(val);
 
-            CanFrame tx;
-            tx.can_id = id;
-            tx.dlc = 5;
-            tx.data[0] = 0x44;
-            tx.data[1] = (u_val >> 0) & 0xFF;
-            tx.data[2] = (u_val >> 8) & 0xFF;
-            tx.data[3] = (u_val >> 16) & 0xFF;
-            tx.data[4] = (u_val >> 24) & 0xFF;
+            std::array<uint8_t, 8> data{};
+            data[0] = 0x44;
+            data[1] = (u_val >> 0) & 0xFF;
+            data[2] = (u_val >> 8) & 0xFF;
+            data[3] = (u_val >> 16) & 0xFF;
+            data[4] = (u_val >> 24) & 0xFF;
 
-            can_driver_.write_frame(tx);
-            std::this_thread::sleep_for(std::chrono::microseconds(200));
+            publish_can_frame(
+                id,
+                5,
+                data,
+                1,
+                "control");
 
-            // 只打印一次，避免每 20 ms 刷屏。
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+
+            // 只打印一次，避免每 20ms 刷屏。
             if (!send_position_log_printed_) {
                 RCLCPP_INFO(
                     get_logger(),
-                    "✅ Send motor %u (%s): %.2f deg -> 44 %02X %02X %02X %02X",
+                    "✅ Request motor %u (%s): %.2f deg -> 44 %02X %02X %02X %02X",
                     id,
                     (i < joint_names_.size() ? joint_names_[i].c_str() : "unknown_joint"),
                     target_deg,
-                    tx.data[1],
-                    tx.data[2],
-                    tx.data[3],
-                    tx.data[4]);
+                    data[1],
+                    data[2],
+                    data[3],
+                    data[4]);
             }
         }
 
@@ -957,7 +961,7 @@ void ManipulatorLifecycleNode::timer_callback()
     }
 
     // ============================================================
-    // 7. 状态上传
+    // 6. 状态上传
     // ============================================================
     if (is_active) {
         publish_joint_states();
@@ -965,7 +969,7 @@ void ManipulatorLifecycleNode::timer_callback()
     }
 }
 
-bool ManipulatorLifecycleNode::process_rx_frame(const CanFrame& frame)
+bool ManipulatorLifecycleNode::process_rx_frame(const hal::msg::CanFrameManipulator& frame)
 {
     if (!is_my_motor_id(frame.can_id)) {
         return false;
@@ -1153,6 +1157,36 @@ bool ManipulatorLifecycleNode::process_rx_frame(const CanFrame& frame)
     }
 
     return false;
+}
+
+void ManipulatorLifecycleNode::can_rx_callback(
+    const hal::msg::CanFrameManipulator::SharedPtr msg)
+{
+    if (!msg) {
+        return;
+    }
+
+    if (!is_my_motor_id(msg->can_id)) {
+        return;
+    }
+
+    hal::msg::CanFrameManipulator frame;
+    frame.stamp = msg->stamp;
+    frame.can_id = msg->can_id;
+    frame.dlc = msg->dlc;
+    frame.priority = msg->priority;
+    frame.source = msg->source;
+    frame.frame_type = msg->frame_type;
+
+    for (size_t i = 0; i < 8; ++i) {
+        frame.data[i] = msg->data[i];
+    }
+
+    if (process_rx_frame(frame)) {
+        last_rx_time_ = this->now();
+        communication_ok_ = true;
+        communication_lost_latched_ = false;
+    }
 }
 
 void ManipulatorLifecycleNode::publish_joint_states()

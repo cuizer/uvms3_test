@@ -5,6 +5,9 @@
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <rclcpp_lifecycle/lifecycle_publisher.hpp>
 
+// 注意：这里仍然保留 can_driver.hpp，
+// 不是为了让 manipulator_driver 直接 open/read/write can0，
+// 而是因为当前 process_rx_frame() 仍然使用 CanFrame 这个结构体类型。
 #include "can_driver.hpp"
 #include "protocol_parser.hpp"
 #include "safety_manager.hpp"
@@ -18,6 +21,7 @@
 
 // 上位机消息与服务
 #include "hal/msg/hal_armmotor.hpp"
+#include "hal/msg/can_frame_manipulator.hpp"
 #include "hal/srv/hal_armmotor_srv.hpp"
 
 #include <array>
@@ -25,6 +29,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <memory>
 
 namespace uvms_hal_manipulator
 {
@@ -60,7 +65,9 @@ protected:
         const rclcpp_lifecycle::State& state) override;
 
 private:
-    // ===================== 回调函数 =====================
+    // ============================================================
+    // 回调函数
+    // ============================================================
 
     // 关节目标指令回调
     void joint_cmd_callback(
@@ -79,14 +86,17 @@ private:
     // 定时器主循环
     void timer_callback();
 
-    // ===================== 初始化与配置 =====================
+    // ============================================================
+    // 初始化与配置
+    // ============================================================
 
     void declare_and_load_parameters();
     bool init_safety_config();
-    bool init_can_driver();
     void reset_runtime_state();
 
-    // ===================== 电机与通信处理 =====================
+    // ============================================================
+    // 电机与通信处理
+    // ============================================================
 
     bool is_my_motor_id(uint32_t can_id) const;
     void build_expected_motor_id_list();
@@ -95,19 +105,46 @@ private:
     void handle_communication_loss();
     void perform_fault_stop();
 
-    bool process_rx_frame(const CanFrame& frame);
+    // 注意：
+    // process_rx_frame() 只负责解析一帧 CAN 数据。
+    // 该帧来自 /hal/can_rx，而不是本节点直接 read can0。
+    bool process_rx_frame(const hal::msg::CanFrameManipulator& frame);
 
-    // ===================== 状态发布 =====================
+    // ============================================================
+    // CAN manager 通信接口
+    //
+    // manipulator_driver 不再直接 open/read/write can0。
+    // 它只发布 /hal/can_tx 请求，并订阅 /hal/can_rx 反馈。
+    // can0 由 can_manager 唯一打开和调度。
+    // ============================================================
+
+    void publish_can_frame(
+        uint32_t can_id,
+        uint8_t dlc,
+        const std::array<uint8_t, 8>& data,
+        uint8_t priority,
+        const std::string& frame_type);
+
+    void can_rx_callback(
+        const hal::msg::CanFrameManipulator::SharedPtr msg);
+
+    // ============================================================
+    // 状态发布
+    // ============================================================
 
     void publish_joint_states();
 
-    // 发布给上位机通信数据管理节点：/hal/armmotor
+    // 发布给上位机通信数据管理节点。
+    // 左臂实际话题：/left_arm/hal/armmotor
+    // 右臂实际话题：/right_arm/hal/armmotor
     void publish_armmotor_state();
 
     void publish_end_effector_pose();
     void publish_status(const std::string& text);
 
-    // ===================== 工具函数 =====================
+    // ============================================================
+    // 工具函数
+    // ============================================================
 
     std::vector<double> int16_array_to_double_vector_2(
         const std::array<int16_t, 2>& arr) const;
@@ -183,11 +220,25 @@ private:
     rclcpp::TimerBase::SharedPtr timer_;
 
     // ============================================================
-    // 驱动、协议、安全管理
+    // CAN manager 通信成员
+    //
+    // 这里使用普通 Publisher，而不是 LifecyclePublisher。
+    // 原因：configure 阶段就需要发布 0x08 查询初始位置，
+    // 如果使用 LifecyclePublisher，容易出现未 active 就无法发布的问题。
+    // ============================================================
+
+    rclcpp::Publisher<hal::msg::CanFrameManipulator>::SharedPtr can_tx_pub_;
+    rclcpp::Subscription<hal::msg::CanFrameManipulator>::SharedPtr can_rx_sub_;
+
+    // ============================================================
+    // 协议、安全管理
+    //
+    // 注意：
+    // 这里不再持有 CanDriver can_driver_。
+    // can0 由 can_manager 节点唯一打开、读取和写入。
     // ============================================================
 
     ProtocolParser protocol_parser_;
-    CanDriver can_driver_;
     SafetyManager safety_manager_;
 
     // ============================================================
@@ -216,7 +267,7 @@ private:
     std::vector<double> latest_joint_velocity_;
     std::vector<double> latest_joint_effort_;
 
-    // 新增：目标关节位置，单位 rad
+    // 目标关节位置，单位 rad
     std::vector<double> target_joint_position_;
 
     // ============================================================
@@ -228,20 +279,20 @@ private:
     ArmControllerState latest_arm_controller_state_{};
 
     // ============================================================
-    // 机械臂侧别与生命周期控制状态
-    // ============================================================
-
-    // ============================================================
-    //  CAN 查询降频控制
+    // CAN 查询降频控制
     // ============================================================
 
     rclcpp::Time last_position_query_time_;
     rclcpp::Time last_error_query_time_;
     rclcpp::Time last_temp_query_time_;
-    
+
     double position_query_period_sec_{0.5};  // 每 500ms 查询一次所有电机位置
     double error_query_period_sec_{2.0};     // 每 2s 查询一次所有电机错误
     double temp_query_period_sec_{2.0};      // 每 2s 查询一次所有电机温度
+
+    // ============================================================
+    // 机械臂侧别与生命周期控制状态
+    // ============================================================
 
     std::string arm_side_;
 
@@ -252,6 +303,7 @@ private:
     // ============================================================
     // 电机 ID 与初始化状态
     // ============================================================
+
     std::vector<int64_t> motor_can_ids_param_;
     std::map<uint32_t, size_t> motor_id_to_joint_index_;
     std::vector<uint32_t> expected_motor_ids_;
@@ -264,14 +316,6 @@ private:
 
     // ============================================================
     // 上位机上传数据缓存
-    //
-    // HalArmmotor.msg:
-    // int64 timestamp
-    // int16[] motor_current
-    // int16[] motor_speed
-    // int16[] motor_position
-    // uint16[] motor_temp
-    // byte[] motor_error
     // ============================================================
 
     std::map<uint32_t, int16_t> latest_motor_current_;
@@ -283,12 +327,12 @@ private:
     // 后续发布到 byte[] motor_error 时，在 cpp 中压缩成 8 位。
     std::map<uint32_t, uint32_t> latest_motor_error_;
 
-// 用于判断 HAL 层和该电机之间是否通信丢失。
+    // 用于判断 HAL 层和该电机之间是否通信丢失。
     std::map<uint32_t, rclcpp::Time> latest_motor_rx_time_;
 
-// 每个电机的 HAL 通信状态。
-// 0：HAL 与该电机通信正常
-// 1：HAL 与该电机通信丢失
+    // 每个电机的 HAL 通信状态。
+    // 0：HAL 与该电机通信正常
+    // 1：HAL 与该电机通信丢失
     std::map<uint32_t, uint8_t> latest_motor_comm_error_;
 
     // ============================================================

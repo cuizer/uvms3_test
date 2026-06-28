@@ -5,16 +5,29 @@ import os
 
 
 def generate_launch_description():
-    # 你的包名 = hal
     pkg_share = get_package_share_directory('hal')
 
     left_arm_params = os.path.join(pkg_share, 'config', 'left_arm.yaml')
     right_arm_params = os.path.join(pkg_share, 'config', 'right_arm.yaml')
 
+    # ---------------- CAN 总线管理节点 ----------------
+    # 唯一负责 open/read/write can0
+    can_manager_node = Node(
+        package='hal',
+        executable='can_manager',
+        name='can_manager',
+        output='screen',
+        parameters=[{
+            'can_interface': 'can0',
+            'send_interval_us': 300,
+            'max_queue_size': 500,
+        }]
+    )
+
     # ---------------- 左臂驱动节点 ----------------
     left_arm_node = LifecycleNode(
-        package='hal',                       # 修正包名
-        executable='manipulator_driver',     # 修正可执行文件
+        package='hal',
+        executable='manipulator_driver',
         name='manipulator_driver',
         namespace='left_arm',
         output='screen',
@@ -23,27 +36,23 @@ def generate_launch_description():
 
     # ---------------- 右臂驱动节点 ----------------
     right_arm_node = LifecycleNode(
-        package='hal',                       # 修正包名
-        executable='manipulator_driver',     # 修正可执行文件
+        package='hal',
+        executable='manipulator_driver',
         name='manipulator_driver',
         namespace='right_arm',
         output='screen',
         parameters=[right_arm_params]
     )
 
-    # ---------------- 双臂故障管理节点 ----------------
+    # ---------------- 双臂生命周期管理节点 ----------------
     dual_arm_manager_node = Node(
-        package='hal',                       # 修正包名
-        executable='dual_arm_lifecycle_manager',   # 你的可执行文件
+        package='hal',
+        executable='dual_arm_lifecycle_manager',
         name='dual_arm_lifecycle_manager',
         output='screen'
     )
 
     # ---------------- 双臂电机状态汇总节点 ----------------
-    # 功能：
-    # 订阅 /left_arm/hal/armmotor
-    # 订阅 /right_arm/hal/armmotor
-    # 发布 /hal/armmotor 给上位机
     armmotor_node = Node(
         package='hal',
         executable='armmotor',
@@ -52,11 +61,6 @@ def generate_launch_description():
     )
 
     # ---------------- 左臂 BSP 轨迹规划节点 ----------------
-    # 功能：
-    # 订阅 /left_arm/hal/manipulator/joint_states
-    # 订阅 /left_arm/bsp/manipulator/target_joint
-    # 使用五次多项式插值生成中间轨迹点
-    # 发布 /left_arm/hal/manipulator/joint_cmd 给左臂 HAL
     left_arm_bsp_trajectory_node = Node(
         package='hal',
         executable='bsp_arm_trajectory_node',
@@ -73,11 +77,6 @@ def generate_launch_description():
     )
 
     # ---------------- 右臂 BSP 轨迹规划节点 ----------------
-    # 功能：
-    # 订阅 /right_arm/hal/manipulator/joint_states
-    # 订阅 /right_arm/bsp/manipulator/target_joint
-    # 使用五次多项式插值生成中间轨迹点
-    # 发布 /right_arm/hal/manipulator/joint_cmd 给右臂 HAL
     right_arm_bsp_trajectory_node = Node(
         package='hal',
         executable='bsp_arm_trajectory_node',
@@ -94,6 +93,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        can_manager_node,
         left_arm_node,
         right_arm_node,
         dual_arm_manager_node,
