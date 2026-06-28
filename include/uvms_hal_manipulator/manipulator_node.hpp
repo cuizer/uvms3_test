@@ -227,7 +227,7 @@ private:
     // 如果使用 LifecyclePublisher，容易出现未 active 就无法发布的问题。
     // ============================================================
 
-    rclcpp::Publisher<hal::msg::CanFrameManipulator>::SharedPtr can_tx_pub_;
+    rclcpp_lifecycle::LifecyclePublisher<hal::msg::CanFrameManipulator>::SharedPtr can_tx_pub_;
     rclcpp::Subscription<hal::msg::CanFrameManipulator>::SharedPtr can_rx_sub_;
 
     // ============================================================

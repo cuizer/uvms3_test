@@ -21,13 +21,13 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 
 # rss封控寻找原生 GPIO 库
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(GPIOD REQUIRED libgpiod)
+# find_package(PkgConfig REQUIRED)
+# pkg_check_modules(GPIOD REQUIRED libgpiod)
 
-find_package(depthai CONFIG REQUIRED
-   PATHS /home/nvidia/depthai-core/build/install/lib/cmake/depthai
-   NO_DEFAULT_PATH
-)
+# find_package(depthai CONFIG REQUIRED
+#    PATHS /home/nvidia/depthai-core/build/install/lib/cmake/depthai
+#    NO_DEFAULT_PATH
+# )
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
 
@@ -129,10 +129,10 @@ ament_target_dependencies(hal_antennacontrol_node rclcpp rclcpp_lifecycle lifecy
 # ==============================================================================
 # rss修改重点：灯光节点配置 (增加了 gpiod 的链接指令)rss封印
 # ==============================================================================
-add_executable(hal_lightcontrol_node src/hal_lightcontrol_node.cpp)
-ament_target_dependencies(hal_lightcontrol_node rclcpp rclcpp_lifecycle lifecycle_msgs std_msgs)
-# 强制链接 libgpiod 库！没有这句会报未定义引用错误 (undefined reference)
-target_link_libraries(hal_lightcontrol_node gpiod)
+# add_executable(hal_lightcontrol_node src/hal_lightcontrol_node.cpp)
+# ament_target_dependencies(hal_lightcontrol_node rclcpp rclcpp_lifecycle lifecycle_msgs std_msgs)
+# # 强制链接 libgpiod 库！没有这句会报未定义引用错误 (undefined reference)
+# target_link_libraries(hal_lightcontrol_node gpiod)
 # ==============================================================================
 
 add_executable(hal_servo_node src/hal_servo_node.cpp)
@@ -173,7 +173,7 @@ ament_target_dependencies(bsp_motioncontrol_node rclcpp rclcpp_lifecycle std_msg
 
 rosidl_target_interfaces(hal_battery_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(hal_antennacontrol_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
-rosidl_target_interfaces(hal_lightcontrol_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
+# rssrosidl_target_interfaces(hal_lightcontrol_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(hal_servo_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(hal_thruster_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(hal_depthsensor_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
@@ -186,7 +186,7 @@ rosidl_target_interfaces(bsp_motioncontrol_node ${PROJECT_NAME} "rosidl_typesupp
 install(TARGETS
   hal_battery_node
   hal_antennacontrol_node
-  hal_lightcontrol_node
+  # rsshal_lightcontrol_node
   hal_servo_node
   hal_thruster_node
   hal_depthsensor_node

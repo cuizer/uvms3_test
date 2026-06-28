@@ -56,6 +56,15 @@ auto ManipulatorLifecycleNode::on_configure(const rclcpp_lifecycle::State&) -> C
     can_tx_pub_ = create_publisher<hal::msg::CanFrameManipulator>(
         "/hal/can_tx",
         rclcpp::QoS(200));
+    can_tx_pub_->on_activate();
+
+    can_rx_sub_ = create_subscription<hal::msg::CanFrameManipulator>(
+        "/hal/can_rx",
+        rclcpp::QoS(200),
+        [this](hal::msg::CanFrameManipulator::SharedPtr msg)
+        {
+            this->can_rx_callback(msg);
+        });
 
     using std::placeholders::_1;
 
