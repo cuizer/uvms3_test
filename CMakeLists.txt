@@ -130,7 +130,7 @@ ament_target_dependencies(hal_antennacontrol_node rclcpp rclcpp_lifecycle lifecy
 # ==============================================================================
 add_executable(hal_lightcontrol_node src/hal_lightcontrol_node.cpp)
 ament_target_dependencies(hal_lightcontrol_node rclcpp rclcpp_lifecycle lifecycle_msgs std_msgs)
-# 强制链接 libgpiod 库！没有这句会报未定义引用错误 (undefined reference)
+# # 强制链接 libgpiod 库！没有这句会报未定义引用错误 (undefined reference)
 target_link_libraries(hal_lightcontrol_node gpiod)
 # ==============================================================================
 

@@ -10,8 +10,6 @@ def generate_launch_description():
     left_arm_params = os.path.join(pkg_share, 'config', 'left_arm.yaml')
     right_arm_params = os.path.join(pkg_share, 'config', 'right_arm.yaml')
 
-    # ---------------- CAN 总线管理节点 ----------------
-    # 唯一负责 open/read/write can0
     can_manager_node = Node(
         package='hal',
         executable='can_manager',
@@ -24,7 +22,6 @@ def generate_launch_description():
         }]
     )
 
-    # ---------------- 左臂驱动节点 ----------------
     left_arm_node = LifecycleNode(
         package='hal',
         executable='manipulator_driver',
@@ -34,7 +31,6 @@ def generate_launch_description():
         parameters=[left_arm_params]
     )
 
-    # ---------------- 右臂驱动节点 ----------------
     right_arm_node = LifecycleNode(
         package='hal',
         executable='manipulator_driver',
@@ -44,7 +40,6 @@ def generate_launch_description():
         parameters=[right_arm_params]
     )
 
-    # ---------------- 双臂生命周期管理节点 ----------------
     dual_arm_manager_node = Node(
         package='hal',
         executable='dual_arm_lifecycle_manager',
@@ -52,15 +47,19 @@ def generate_launch_description():
         output='screen'
     )
 
-    # ---------------- 双臂电机状态汇总节点 ----------------
     armmotor_node = Node(
         package='hal',
         executable='armmotor',
         name='armmotor',
-        output='screen'
+        output='screen',
+        parameters=[{
+            'enable_csv_logging': True,
+            'csv_log_directory': 'armmotor_logs',
+            'csv_log_file_prefix': 'armmotor',
+            'csv_flush_every_n': 50,
+        }]
     )
 
-    # ---------------- 左臂 BSP 轨迹规划节点 ----------------
     left_arm_bsp_trajectory_node = Node(
         package='hal',
         executable='bsp_arm_trajectory_node',
@@ -76,7 +75,6 @@ def generate_launch_description():
         }]
     )
 
-    # ---------------- 右臂 BSP 轨迹规划节点 ----------------
     right_arm_bsp_trajectory_node = Node(
         package='hal',
         executable='bsp_arm_trajectory_node',
