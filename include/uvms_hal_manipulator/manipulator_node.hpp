@@ -9,7 +9,6 @@
 // 不是为了让 manipulator_driver 直接 open/read/write can0，
 // 而是因为当前 process_rx_frame() 仍然使用 CanFrame 这个结构体类型。
 #include "can_driver.hpp"
-#include "protocol_parser.hpp"
 #include "safety_manager.hpp"
 
 #include "trajectory_msgs/msg/joint_trajectory_point.hpp"
@@ -237,8 +236,6 @@ private:
     // 这里不再持有 CanDriver can_driver_。
     // can0 由 can_manager 节点唯一打开、读取和写入。
     // ============================================================
-
-    ProtocolParser protocol_parser_;
     SafetyManager safety_manager_;
 
     // ============================================================
@@ -269,14 +266,6 @@ private:
 
     // 目标关节位置，单位 rad
     std::vector<double> target_joint_position_;
-
-    // ============================================================
-    // 原有机械臂状态结构体
-    // ============================================================
-
-    ArmCabinMotorState latest_armcabin_motor_state_{};
-    ArmMotorState latest_arm_motor_state_{};
-    ArmControllerState latest_arm_controller_state_{};
 
     // ============================================================
     // CAN 查询降频控制
