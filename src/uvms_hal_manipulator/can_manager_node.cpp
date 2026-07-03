@@ -30,7 +30,7 @@ public:
         // 不要用 size_t 作为 declare_parameter 类型。
         // Humble 中 size_t / unsigned long 会导致 ParameterValue 构造歧义。
         // ========================================================
-        this->declare_parameter<std::string>("can_interface", "can0");
+        this->declare_parameter<std::string>("can_interface", "can4");
         this->declare_parameter<int>("send_interval_us", 300);
         this->declare_parameter<int>("max_queue_size", 500);
 

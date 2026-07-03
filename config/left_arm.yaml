@@ -1,7 +1,7 @@
 /left_arm/manipulator_driver:
   ros__parameters:
     arm_name: left_arm
-    can_interface: can0
+    can_interface: can4
     arm_side: left
 
     require_initial_pose_before_activate: true

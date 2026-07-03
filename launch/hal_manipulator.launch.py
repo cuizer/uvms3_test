@@ -16,7 +16,7 @@ def generate_launch_description():
         name='can_manager',
         output='screen',
         parameters=[{
-            'can_interface': 'can0',
+            'can_interface': 'can4',
             'send_interval_us': 300,
             'max_queue_size': 500,
         }]

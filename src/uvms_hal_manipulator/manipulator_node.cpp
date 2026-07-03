@@ -19,7 +19,7 @@ namespace uvms_hal_manipulator
 ManipulatorLifecycleNode::ManipulatorLifecycleNode(const rclcpp::NodeOptions& options)
 : rclcpp_lifecycle::LifecycleNode("manipulator_driver", options),
   arm_name_("arm"),
-  can_interface_("can0"),
+  can_interface_("can4"),
   base_frame_("base_link"),
   ee_frame_("ee_link"),
   arm_side_("left"),
@@ -251,7 +251,7 @@ void ManipulatorLifecycleNode::publish_can_frame(
 void ManipulatorLifecycleNode::declare_and_load_parameters()
 {
     this->declare_parameter<std::string>("arm_name", "arm");
-    this->declare_parameter<std::string>("can_interface", "can0");
+    this->declare_parameter<std::string>("can_interface", "can4");
     this->declare_parameter<std::string>("base_frame", "base_link");
     this->declare_parameter<std::string>("ee_frame", "ee_link");
     this->declare_parameter<double>("publish_rate_hz", 50.0);
