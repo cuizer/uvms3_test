@@ -20,6 +20,7 @@ find_package(lifecycle_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 
+
 # 封控寻找原生 GPIO 库
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GPIOD REQUIRED libgpiod)
@@ -28,8 +29,8 @@ find_package(depthai CONFIG REQUIRED
    PATHS /home/nvidia/depthai-core/build/install/lib/cmake/depthai
    NO_DEFAULT_PATH
 )
-find_package(cv_bridge REQUIRED)
-find_package(OpenCV REQUIRED)
+ find_package(cv_bridge REQUIRED)
+ find_package(OpenCV REQUIRED)
 
 include_directories(include)
 
@@ -117,6 +118,28 @@ ament_target_dependencies(can_manager
 
 rosidl_target_interfaces(can_manager ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
+add_executable(hal_cabinmotor_node
+  src/hal_cabinmotor_node.cpp
+)
+
+target_include_directories(hal_cabinmotor_node
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+ament_target_dependencies(hal_cabinmotor_node
+  rclcpp
+  rclcpp_lifecycle
+  std_msgs
+  sensor_msgs
+  std_srvs
+  trajectory_msgs
+)
+
+target_link_libraries(hal_cabinmotor_node
+  Threads::Threads
+)
+
 # ==============================================================================
 
 add_executable(hal_battery_node src/hal_battery_node.cpp)
@@ -194,6 +217,7 @@ install(TARGETS
   # hal_binocamera_node
   bsp_comm_node
   bsp_motioncontrol_node
+  hal_cabinmotor_node
   manipulator_driver
   dual_arm_lifecycle_manager
   armmotor
