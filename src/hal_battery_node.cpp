@@ -2,6 +2,7 @@
 #include <string>
 #include <cstring>  // 用于 memset
 #include <map>
+#include <vector>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <lifecycle_msgs/msg/state.hpp>
@@ -13,6 +14,7 @@
 #include <linux/can.h>
 #include <linux/can/raw.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <errno.h>
 #include "hal/msg/hal_battery.hpp"
@@ -88,11 +90,42 @@ struct BatteryStatusData {
   BmsData bms_data;         
 };
 
+namespace {
+
+bool run_ip_command(const std::vector<std::string> & arguments)
+{
+  std::vector<char *> argv;
+  argv.reserve(arguments.size() + 1);
+  for (const auto & argument : arguments) {
+    argv.push_back(const_cast<char *>(argument.c_str()));
+  }
+  argv.push_back(nullptr);
+
+  const pid_t pid = fork();
+  if (pid < 0) {
+    return false;
+  }
+
+  if (pid == 0) {
+    execvp(argv[0], argv.data());
+    _exit(127);
+  }
+
+  int status = 0;
+  if (waitpid(pid, &status, 0) < 0) {
+    return false;
+  }
+  return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+}  // namespace
+
 class CanInterface {
 public:
   CanInterface(const std::string & can_interface);
   ~CanInterface();
   
+  bool configure(uint32_t bitrate);
   bool init();
   void close();
   bool send_control_command(bool state_12v, bool state_24v, bool state_72v);
@@ -108,6 +141,17 @@ CanInterface::CanInterface(const std::string & can_interface)
 : can_interface_(can_interface), socket_fd_(-1) {}
 
 CanInterface::~CanInterface() { close(); }
+
+bool CanInterface::configure(uint32_t bitrate)
+{
+  close();
+
+  return run_ip_command({"ip", "link", "set", can_interface_, "down"}) &&
+         run_ip_command({
+           "ip", "link", "set", can_interface_, "type", "can", "bitrate",
+           std::to_string(bitrate)}) &&
+         run_ip_command({"ip", "link", "set", can_interface_, "up"});
+}
 
 bool CanInterface::init()
 {
@@ -362,7 +406,17 @@ public:
   on_configure(const rclcpp_lifecycle::State &)
   {
     if (!simulation_mode_) {
-      can_interface_.init();
+      if (!can_interface_.configure(125000)) {
+        RCLCPP_ERROR(
+          this->get_logger(),
+          "无法将 can3 配置为 125 kbps 并启动；请确认接口存在且当前进程具有 CAP_NET_ADMIN 权限");
+        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+      }
+
+      if (!can_interface_.init()) {
+        RCLCPP_ERROR(this->get_logger(), "无法打开 SocketCAN 接口 can3");
+        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+      }
     }
     
     battery_pub_ = this->create_publisher<hal::msg::HalBattery>("/hal/battery", 10);
