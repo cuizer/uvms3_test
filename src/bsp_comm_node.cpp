@@ -15,9 +15,19 @@
 #include "hal/msg/hal_armmotor.hpp"
 #include "hal/msg/hal_antenna.hpp"
 
+
+//#include "hal/msg/hal_antenna_control.hpp"
+//#include "hal/msg/hal_light_control.hpp"
+
+
+#include "hal/srv/hal_battery_control_srv.hpp"
+
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <atomic>
+#include <vector>
+#include <errno.h>
 
 #include <thread>
 #include <cstring>
@@ -29,8 +39,11 @@ class BspCommNode : public rclcpp_lifecycle::LifecycleNode
 public:
     BspCommNode(): LifecycleNode("bsp_comm_node")
     {
-        this->declare_parameter<std::string>("udp_ip", "127.0.0.1");
-        this->declare_parameter<int>("udp_port", 5000);
+        this->declare_parameter<std::string>("local_ip", "192.168.137.2");
+        this->declare_parameter<int>("local_port", 8113);
+
+        this->declare_parameter<std::string>("target_ip", "192.168.137.1");
+        this->declare_parameter<int>("target_port", 8114);
     }
 
     // ================= 生命周期 =================
@@ -48,23 +61,58 @@ public:
         tailservo_sub_    = this->create_subscription<hal::msg::HalTailservo>("/hal/tailservo",qos,std::bind(&BspCommNode::tailservo_callback, this, std::placeholders::_1));
         armmotor_sub_     = this->create_subscription<hal::msg::HalArmmotor>("/hal/armmotor",qos,std::bind(&BspCommNode::armmotor_callback, this, std::placeholders::_1));
         antenna_sub_      = this->create_subscription<hal::msg::HalAntenna>("/hal/antenna",qos,std::bind(&BspCommNode::antenna_callback, this, std::placeholders::_1));
-
-        color_image_sub_  = this->create_subscription<sensor_msgs::msg::Image>("/uvms/perception/image_raw",rclcpp::SensorDataQoS(),std::bind(&BspCommNode::color_image_callback, this, std::placeholders::_1));
+        
+        // color_image_sub_  = this->create_subscription<sensor_msgs::msg::Image>("/uvms/perception/image_raw",rclcpp::SensorDataQoS(),std::bind(&BspCommNode::color_image_callback, this, std::placeholders::_1));
+        // depth_image_sub_  = this->create_subscription<sensor_msgs::msg::Image>("/uvms/perception/depth",rclcpp::SensorDataQoS(),std::bind(&BspCommNode::depth_image_callback, this, std::placeholders::_1));
+        
+        //antenna_control_pub_    = this->create_publisher<hal::msg::HalAntennaControl>("/hal/antennacontrol", 10);
+        //light_control_pub_      = this->create_publisher<hal::msg::HalLightControl>("/hal/lightcontrol", 10);
+        
+        battery_control_client_ = this->create_client<hal::srv::HalBatteryControlSrv>("/hal/batterycontrol");
  
-        udp_ip_ = this->get_parameter("udp_ip").as_string();
-        udp_port_ = this->get_parameter("udp_port").as_int();
+        local_ip_ = this->get_parameter("local_ip").as_string();
+        local_port_ = this->get_parameter("local_port").as_int();
+
+        target_ip_ = this->get_parameter("target_ip").as_string();
+        target_port_ = this->get_parameter("target_port").as_int();
 
         // 创建UDP socket
         sock_ = socket(AF_INET, SOCK_DGRAM, 0);
         if (sock_ < 0) {
-            RCLCPP_ERROR(get_logger(), "Socket create failed");
+            RCLCPP_ERROR(this->get_logger(), "UDP socket create failed");
+            return CallbackReturn::FAILURE;
+        }
+        
+        int opt = 1;
+        setsockopt(sock_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        
+        memset(&local_addr_, 0, sizeof(local_addr_));
+        local_addr_.sin_family = AF_INET;
+        local_addr_.sin_port = htons(local_port_);
+        
+        if (inet_pton(AF_INET, local_ip_.c_str(), &local_addr_.sin_addr) <= 0) {
+            RCLCPP_ERROR(this->get_logger(), "Invalid local IP: %s", local_ip_.c_str());
+            close(sock_);
+            sock_ = -1;
             return CallbackReturn::FAILURE;
         }
 
+        if (bind(sock_, reinterpret_cast<sockaddr*>(&local_addr_), sizeof(local_addr_)) < 0) {
+            RCLCPP_ERROR(this->get_logger(), "UDP bind failed: %s:%d, errno=%d", local_ip_.c_str(), local_port_, errno);
+            close(sock_);
+            sock_ = -1;
+            return CallbackReturn::FAILURE;
+        }
+        
         memset(&target_addr_, 0, sizeof(target_addr_));
         target_addr_.sin_family = AF_INET;
-        target_addr_.sin_port = htons(udp_port_);
-        inet_pton(AF_INET, udp_ip_.c_str(), &target_addr_.sin_addr);
+        target_addr_.sin_port = htons(target_port_);
+
+        if (inet_pton(AF_INET, target_ip_.c_str(), &target_addr_.sin_addr) <= 0) {
+            RCLCPP_ERROR(this->get_logger(), "Invalid target IP: %s", target_ip_.c_str()); close(sock_);
+            sock_ = -1;
+            return CallbackReturn::FAILURE;
+        }
 
         timer_ = this->create_wall_timer(std::chrono::milliseconds(20),std::bind(&BspCommNode::udp_send, this));
 
@@ -74,12 +122,17 @@ public:
     CallbackReturn on_activate(const rclcpp_lifecycle::State &)
     {
         active_ = true;
+        udp_recv_running_ = true;
+        udp_recv_thread_ = std::thread(&BspCommNode::udp_receive_function, this);
         return CallbackReturn::SUCCESS;
     }
 
     CallbackReturn on_deactivate(const rclcpp_lifecycle::State &)
     {
         active_ = false;
+        udp_recv_running_ = false;
+        if (sock_ >= 0) {::shutdown(sock_, SHUT_RDWR);}
+        if (udp_recv_thread_.joinable()) {udp_recv_thread_.join();}
         return CallbackReturn::SUCCESS;
     }
 
@@ -96,7 +149,13 @@ public:
         antenna_sub_.reset();
         color_image_sub_.reset();
         timer_.reset();
+        
+        udp_recv_running_ = false;
+        if (sock_ >= 0) {::shutdown(sock_, SHUT_RDWR);}
+        if (udp_recv_thread_.joinable()) { udp_recv_thread_.join();}
 
+        if (sock_ >= 0) {close(sock_); sock_ = -1;}
+        
         cv::destroyAllWindows();
 
         if (sock_ >= 0) {
@@ -151,7 +210,7 @@ private:
         if (!active_) return;
         tailservo_data_ = *msg;
     }
-
+    
     void armmotor_callback(const hal::msg::HalArmmotor::SharedPtr msg)
     {
         if (!active_) return;
@@ -163,7 +222,7 @@ private:
         if (!active_) return;
         antenna_data_ = *msg;
     }
-
+    
     void color_image_callback(const sensor_msgs::msg::Image::SharedPtr msg)
     {
         if (!active_) return;
@@ -246,27 +305,16 @@ private:
     
     std::vector<uint8_t> pack_auxithruster(const hal::msg::HalAuxithruster & msg)
     {
-        std::vector<uint8_t> buf(sizeof(int64_t) + 5 * sizeof(int16_t) + 5 * sizeof(int16_t) + 5 * sizeof(uint16_t) + 5 * sizeof(uint8_t) + 5 * sizeof(uint8_t));
+        std::vector<uint8_t> buf(sizeof(int64_t) + 6 * sizeof(int16_t) + 6 * sizeof(int16_t) + 6 * sizeof(uint16_t) + 6 * sizeof(uint8_t) + 6 * sizeof(uint8_t));
 
         uint8_t* p = buf.data();
 
-        memcpy(p, &msg.timestamp, sizeof(int64_t));
-        p += sizeof(int64_t);
-
-        memcpy(p, msg.rpm.data(), 5 * sizeof(int16_t));
-        p += 5 * sizeof(int16_t);
-
-        memcpy(p, msg.current.data(), 5 * sizeof(int16_t));
-        p += 5 * sizeof(int16_t);
-
-        memcpy(p, msg.voltage.data(), 5 * sizeof(uint16_t));
-        p += 5 * sizeof(uint16_t);
-
-        memcpy(p, msg.esc_status.data(), 5 * sizeof(uint8_t));
-        p += 5 * sizeof(uint8_t);
-
-        memcpy(p, msg.fault_status.data(), 5 * sizeof(uint8_t));
-        p += 5 * sizeof(uint8_t);
+        memcpy(p, &msg.timestamp, sizeof(int64_t)); p += sizeof(int64_t);
+        memcpy(p, msg.rpm.data(), 6 * sizeof(int16_t)); p += 6 * sizeof(int16_t);
+        memcpy(p, msg.current.data(), 6 * sizeof(int16_t)); p += 6 * sizeof(int16_t);
+        memcpy(p, msg.voltage.data(), 6 * sizeof(uint16_t)); p += 6 * sizeof(uint16_t);
+        memcpy(p, msg.esc_status.data(), 6 * sizeof(uint8_t)); p += 6 * sizeof(uint8_t);
+        memcpy(p, msg.fault_status.data(), 6 * sizeof(uint8_t)); p += 6 * sizeof(uint8_t);
 
         return buf;
     }
@@ -310,30 +358,19 @@ private:
 
         return buf;
     }
-
+    
     std::vector<uint8_t> pack_armmotor(const hal::msg::HalArmmotor & msg)
     {
         std::vector<uint8_t> buf(sizeof(int64_t) + 10 * sizeof(int16_t) + 10 * sizeof(int16_t) + 10 * sizeof(int16_t) + 10 * sizeof(uint16_t) + 10 * sizeof(uint8_t));
 
         uint8_t* p = buf.data();
 
-        memcpy(p, &msg.timestamp, sizeof(int64_t));
-        p += sizeof(int64_t);
-
-        memcpy(p, msg.motor_current.data(), 10 * sizeof(int16_t));
-        p += 10 * sizeof(int16_t);
-
-        memcpy(p, msg.motor_speed.data(), 10 * sizeof(int16_t));
-        p += 10 * sizeof(int16_t);
-
-        memcpy(p, msg.motor_position.data(), 10 * sizeof(int16_t));
-        p += 10 * sizeof(int16_t);
-
-        memcpy(p, msg.motor_temp.data(), 10 * sizeof(uint16_t));
-        p += 10 * sizeof(uint16_t);
-
-        memcpy(p, msg.motor_error.data(), 10 * sizeof(uint8_t));
-        p += 10 * sizeof(uint8_t);
+        memcpy(p, &msg.timestamp, sizeof(int64_t)); p += sizeof(int64_t);
+        memcpy(p, msg.motor_current.data(), 10 * sizeof(int16_t)); p += 10 * sizeof(int16_t);
+        memcpy(p, msg.motor_speed.data(), 10 * sizeof(int16_t)); p += 10 * sizeof(int16_t);
+        memcpy(p, msg.motor_position.data(), 10 * sizeof(int16_t)); p += 10 * sizeof(int16_t);
+        memcpy(p, msg.motor_temp.data(), 10 * sizeof(uint16_t)); p += 10 * sizeof(uint16_t);
+        memcpy(p, msg.motor_error.data(), 10 * sizeof(uint8_t)); p += 10 * sizeof(uint8_t);
 
         return buf;
     }
@@ -371,7 +408,7 @@ private:
     
     void print_dvl(const hal::msg::HalDvl & msg)
     {
-    RCLCPP_INFO(this->get_logger(), "[Dvl]\n""timestamp: %ld | velocity_x: %.2f | velocity_y: %.2f | velocity_z: %.2f",
+    RCLCPP_INFO(this->get_logger(), "[Dvl]\n" "timestamp: %ld | velocity_x: %.2f | velocity_y: %.2f | velocity_z: %.2f",
         msg.timestamp,
         msg.velocity_x,
         msg.velocity_y,
@@ -381,12 +418,7 @@ private:
     
     void print_depthsensor(const hal::msg::HalDepthsensor & msg)
     {
-    RCLCPP_INFO(this->get_logger(), 
-        "[Depthsensor]\n"
-        "timestamp: %ld\n"
-        "depth_1: %.3f m | temp_1: %u\n"
-        "depth_2: %.3f m | temp_2: %u\n"
-        "depth_avg: %.3f m",
+    RCLCPP_INFO(this->get_logger(), "[Depthsensor]\n" "timestamp: %ld\n" "depth_1: %.3f m | temp_1: %u\n" "depth_2: %.3f m | temp_2: %u\n" "depth_avg: %.3f m",
         msg.timestamp,
         msg.depth_1,
         msg.temp_1,
@@ -398,13 +430,7 @@ private:
     
     void print_mainthruster(const hal::msg::HalMainthruster & msg)
     {
-    RCLCPP_INFO(this->get_logger(),
-        "[MainThruster]\n"
-        "timestamp: %ld\n"
-        "rpm: %d\n"
-        "current: %d\n"
-        "voltage: %d\n"
-        "fault_status: %u",
+    RCLCPP_INFO(this->get_logger(), "[MainThruster]\n" "timestamp: %ld\n" "rpm: %d\n" "current: %d\n" "voltage: %d\n" "fault_status: %u",
         msg.timestamp,
         msg.rpm,
         msg.current,
@@ -417,7 +443,7 @@ private:
     {
     RCLCPP_INFO(this->get_logger(),"timestamp: %ld", msg.timestamp);
 
-    for (size_t i = 0; i < 5; ++i)
+    for (size_t i = 0; i < 6; ++i)
     {
     RCLCPP_INFO(this->get_logger(), "[Thruster %zu] rpm:%d | current:%d | voltage:%u | esc:%u | fault:%u", i,msg.rpm[i],msg.current[i],msg.voltage[i],msg.esc_status[i],msg.fault_status[i]);
     }
@@ -425,17 +451,8 @@ private:
     
     void print_battery(const hal::msg::HalBattery & msg)
     {
-    RCLCPP_INFO(this->get_logger(),
-        "[Battery]\n"
-        "ts: %ld\n"
-        "status: 48V=%u | 72V=%u\n"
-        "voltage: 48V=%.1fV | 72V=%.1fV\n"
-        "current: 48V=%.1fA | 72V=%.1fA\n"
-        "cycle: 48V=%u | 72V=%u\n"
-        "temp: 48V=%uC | 72V=%uC\n"
-        "remain: 48V=%.1fAh | 72V=%.1fAh\n"
-        "total: 48V=%.1fAh | 72V=%.1fAh\n"
-        "switch: 12V=%u | 24V=%u | 72V=%u",
+    RCLCPP_INFO(this->get_logger(), "[Battery]\n" "ts: %ld\n" "status: 48V=%u | 72V=%u\n" "voltage: 48V=%.1fV | 72V=%.1fV\n" "current: 48V=%.1fA | 72V=%.1fA\n" "cycle: 48V=%u | 72V=%u\n" "temp: 48V=%uC | 72V=%uC\n" "remain: 48V=%.1fAh | 72V=%.1fAh\n"
+                                    "total: 48V=%.1fAh | 72V=%.1fAh\n" "switch: 12V=%u | 24V=%u | 72V=%u",
         msg.timestamp,
         msg.battery_status_48v,
         msg.battery_status_72v,
@@ -466,7 +483,7 @@ private:
         RCLCPP_INFO( this->get_logger(), "[TailServo %zu] position: %.2f", i, msg.position[i]);
     }
     }
-
+    
     void print_armmotor(const hal::msg::HalArmmotor & msg)
     {
     RCLCPP_INFO(this->get_logger(), "timestamp: %ld", msg.timestamp);
@@ -485,12 +502,7 @@ private:
     
     void print_antenna(const hal::msg::HalAntenna & msg)
     {
-    RCLCPP_INFO(this->get_logger(),
-        "[Antenna]\n"
-        "timestamp: %ld\n"
-        "brake_status: %u\n"
-        "run_status: %u\n"
-        "total_angle: %.3f deg",
+    RCLCPP_INFO(this->get_logger(), "[Antenna]\n" "timestamp: %ld\n" "brake_status: %u\n" "run_status: %u\n" "total_angle: %.3f deg",
         msg.timestamp,
         msg.brake_status,
         msg.running_status,
@@ -500,20 +512,27 @@ private:
     
     std::vector<uint8_t> build_packet(uint8_t msg_id, const std::vector<uint8_t>& payload)
     {
-        uint16_t header = 0x55AA;
-        uint16_t len = payload.size();
-
-        std::vector<uint8_t> packet(sizeof(header)+1+sizeof(len)+len);
+        // 数据长度
+        uint16_t payload_len = static_cast<uint16_t>(payload.size());
+        std::vector<uint8_t> packet(2 + 1 + 2 + payload_len);
 
         uint8_t* p = packet.data();
 
-        memcpy(p, &header, 2); p += 2;
-        memcpy(p, &msg_id, 1); p += 1;
-        memcpy(p, &len, 2); p += 2;
-        memcpy(p, payload.data(), len);
+        *p++ = 0x55;
+        *p++ = 0xAA;
+
+        *p++ = msg_id;
+
+        *p++ = static_cast<uint8_t>((payload_len >> 8) & 0xFF);
+        *p++ = static_cast<uint8_t>(payload_len & 0xFF);
+
+        if (payload_len > 0)
+        {
+            memcpy(p, payload.data(), payload_len);
+        }
 
         return packet;
-    }
+    }  
     
     // ================= UDP发送 =================
     void udp_send()
@@ -521,7 +540,7 @@ private:
         if (!active_) return;
 
         static int count = 0;
-        bool do_print = (++count % 50 == 0);
+        bool do_print = (++count % 1000 == 0);
 
         // ---------- Inertialnavi ----------
         if (inertial_data_.has_value())
@@ -578,7 +597,7 @@ private:
             }
 
             auto payload = pack_mainthruster(msg);
-            auto packet = build_packet(0x03, payload);
+            auto packet = build_packet(0x04, payload);
             
             sendto(sock_, packet.data(), packet.size(), 0, reinterpret_cast<struct sockaddr*>(&target_addr_), sizeof(target_addr_));
         }
@@ -593,7 +612,7 @@ private:
             }
 
             auto payload = pack_auxithruster(msg);
-            auto packet = build_packet(0x03, payload);
+            auto packet = build_packet(0x05, payload);
             
             sendto(sock_, packet.data(), packet.size(), 0, reinterpret_cast<struct sockaddr*>(&target_addr_), sizeof(target_addr_));
         }
@@ -608,7 +627,7 @@ private:
             }
 
             auto payload = pack_battery(msg);
-            auto packet = build_packet(0x03, payload);
+            auto packet = build_packet(0x06, payload);
             
             sendto(sock_, packet.data(), packet.size(), 0, reinterpret_cast<struct sockaddr*>(&target_addr_), sizeof(target_addr_));
         }
@@ -623,11 +642,11 @@ private:
             }
 
             auto payload = pack_tailservo(msg);
-            auto packet = build_packet(0x03, payload);
+            auto packet = build_packet(0x07, payload);
             
             sendto(sock_, packet.data(), packet.size(), 0, reinterpret_cast<struct sockaddr*>(&target_addr_), sizeof(target_addr_));
         }
-
+        
     // ---------- Armmotor ----------
         if (armmotor_data_.has_value())
         {
@@ -638,7 +657,7 @@ private:
             }
 
             auto payload = pack_armmotor(msg);
-            auto packet = build_packet(0x03, payload);
+            auto packet = build_packet(0x09, payload);
             
             sendto(sock_, packet.data(), packet.size(), 0, reinterpret_cast<struct sockaddr*>(&target_addr_), sizeof(target_addr_));
         }
@@ -653,12 +672,51 @@ private:
             }
 
             auto payload = pack_antenna(msg);
-            auto packet = build_packet(0x03, payload);
+            auto packet = build_packet(0x12, payload);
             
             sendto(sock_, packet.data(), packet.size(), 0, reinterpret_cast<struct sockaddr*>(&target_addr_), sizeof(target_addr_));
         }
         
         
+    }
+    
+    // ================= UDP接收 =================
+    void udp_receive_function()
+    {
+        RCLCPP_INFO(this->get_logger(), "UDP receive thread started, listening on %s:%d", local_ip_.c_str(), local_port_);
+
+        uint8_t buffer[2048];
+
+        while (udp_recv_running_) {
+            sockaddr_in sender_addr{};
+            socklen_t sender_len = sizeof(sender_addr);
+
+            ssize_t recv_len = recvfrom(sock_, buffer, sizeof(buffer), 0, reinterpret_cast<sockaddr*>(&sender_addr), &sender_len);
+
+            if (recv_len <= 0) {
+                if (udp_recv_running_) {
+                    RCLCPP_WARN(this->get_logger(), "UDP recvfrom failed");
+                }
+                continue;
+            }
+
+            char sender_ip[INET_ADDRSTRLEN] = {0};
+            inet_ntop(AF_INET, &sender_addr.sin_addr, sender_ip, sizeof(sender_ip));
+            int sender_port = ntohs(sender_addr.sin_port);
+
+            std::string hex_str;
+            char tmp[8];
+
+            for (ssize_t i = 0; i < recv_len; ++i) {
+                snprintf(tmp, sizeof(tmp), "%02X ", buffer[i]);
+                hex_str += tmp;
+            }
+
+            std::vector<uint8_t> frame(buffer, buffer + recv_len);
+            handle_command_frame(frame);
+        }
+
+        RCLCPP_INFO(this->get_logger(), "UDP receive thread stopped");
     }
 
 private:
@@ -672,7 +730,12 @@ private:
     rclcpp::Subscription<hal::msg::HalArmmotor>::SharedPtr armmotor_sub_;
     rclcpp::Subscription<hal::msg::HalAntenna>::SharedPtr antenna_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr color_image_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
+    
+   // rclcpp::Publisher<hal::msg::HalAntennaControl>::SharedPtr antenna_control_pub_;
+   // rclcpp::Publisher<hal::msg::HalLightControl>::SharedPtr light_control_pub_;
+    rclcpp::Client<hal::srv::HalBatteryControlSrv>::SharedPtr battery_control_client_;
 
     std::optional<hal::msg::HalInertialnavi> inertial_data_;
     std::optional<hal::msg::HalDvl> dvl_data_;
@@ -685,11 +748,119 @@ private:
     std::optional<hal::msg::HalAntenna> antenna_data_;
 
     int sock_{-1};
-    std::string udp_ip_;
-    int udp_port_;
+    std::string local_ip_;
+    int local_port_{8113};
+    std::string target_ip_;
+    int target_port_{8114};
+    struct sockaddr_in local_addr_;
     struct sockaddr_in target_addr_;
+    std::thread udp_recv_thread_;
+    std::atomic<bool> udp_recv_running_{false};
 
     bool active_{false};
+    
+    void handle_command_frame(const std::vector<uint8_t>& frame)
+    {
+        if (frame.size() < 5) {RCLCPP_WARN(this->get_logger(), "Command frame too short"); return;} 
+
+        if (frame[0] != 0x55 || frame[1] != 0xAA) {RCLCPP_WARN(this->get_logger(), "Invalid command header"); return;}
+
+        uint8_t msg_id = frame[2];
+        uint16_t payload_len = (static_cast<uint16_t>(frame[3]) << 8) | static_cast<uint16_t>(frame[4]);
+
+        if (frame.size() != static_cast<size_t>(5 + payload_len)) {RCLCPP_WARN(this->get_logger(), "Invalid command length"); return;}
+
+        std::vector<uint8_t> payload(frame.begin() + 5, frame.end());
+        RCLCPP_INFO(this->get_logger(), "Received command: msg_id=0x%02X, payload_len=%d", msg_id, payload_len);
+
+        dispatch_command(msg_id, payload);
+    }
+    
+    void dispatch_command(uint8_t msg_id, const std::vector<uint8_t>& payload)
+    {
+        switch(msg_id)
+        {
+             // 灯光控制
+            //case 0x30:{light_control(payload); break;}
+            
+            // 天线控制
+            //case 0x31:
+            //{antenna_control(payload); break;}
+            
+            // 电池控制
+            case 0x35:
+            {battery_control(payload); break;}
+
+            default:
+            {RCLCPP_WARN(this->get_logger(), "Unknown command id: 0x%02X", msg_id); break;}
+        }
+    }
+    
+    // 灯光控制
+    /*
+    void light_control(const std::vector<uint8_t>& payload)
+    {
+        if(payload.size() != 1) {RCLCPP_WARN(this->get_logger(), "Light command payload length error: %ld", payload.size()); return;}
+
+        uint8_t light_coeff = payload[0];
+
+        RCLCPP_INFO(this->get_logger(), "Light command received: brightness=%d", light_coeff);
+        hal::msg::HalLightControl msg;
+        msg.light_coeff = light_coeff;
+
+        light_control_pub_->publish(msg);
+
+        RCLCPP_INFO(this->get_logger(), "Publish light control command");
+    }
+    */
+    // 天线控制 
+    /*
+    void antenna_control(const std::vector<uint8_t>& payload)
+    {
+        if(payload.size() != 5) {RCLCPP_WARN(this->get_logger(), "Antenna command payload length error: %ld", payload.size()); return;}
+
+        uint8_t cmd_type;
+        float target_coeff;
+        const uint8_t* p = payload.data();
+
+        // 解析运行状态
+        memcpy(&cmd_type, p, sizeof(uint8_t));
+        p += sizeof(uint8_t);
+        // 解析位置系数
+        memcpy(&target_coeff, p, sizeof(float));
+
+        RCLCPP_INFO(this->get_logger(), "Antenna command: cmd_type=%d, target_coeff=%.3f", cmd_type, target_coeff);
+        // 构造ROS消息
+        hal::msg::HalAntennaControl msg;
+        msg.cmd_type = cmd_type;
+        msg.target_coeff = target_coeff;
+        // 发布给HAL天线节点
+        antenna_control_pub_->publish(msg);
+
+        RCLCPP_INFO(this->get_logger(), "Published /hal/antenna_control");
+    }
+    */
+    void battery_control(const std::vector<uint8_t>& payload)
+    {
+        if (!battery_control_client_->service_is_ready()) {RCLCPP_WARN(this->get_logger(), "/hal/batterycontrol service not ready"); return;}
+        if(payload.size() != 1) {RCLCPP_WARN(this->get_logger(), "Battery command payload length error: %ld", payload.size()); return;}
+        
+        uint8_t cmd = payload[0];
+        RCLCPP_INFO(this->get_logger(), "Battery command received: cmd=0x%02X", cmd);
+
+        auto request = std::make_shared<hal::srv::HalBatteryControlSrv::Request>();
+        request->command = cmd;
+
+        battery_control_client_->async_send_request(request, [this, cmd](rclcpp::Client<hal::srv::HalBatteryControlSrv>::SharedFuture future)
+            {
+                try {
+                    auto response = future.get();
+                    RCLCPP_INFO(this->get_logger(), "Battery service response: cmd=0x%02X, success=%d, message=%s", cmd, response->success, response->message.c_str());
+                    }
+                catch (const std::exception& e) {RCLCPP_ERROR(this->get_logger(), "Battery service call failed: %s", e.what());}
+            }
+        );
+    }
 };
 
 
@@ -697,7 +868,7 @@ int main(int argc, char **argv)
 {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<BspCommNode>();
-    rclcpp::executors::SingleThreadedExecutor executor;
+    rclcpp::executors::MultiThreadedExecutor executor;
     executor.add_node(node->get_node_base_interface());
     executor.spin();
     rclcpp::shutdown();
