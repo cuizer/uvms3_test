@@ -431,11 +431,17 @@ colcon build --packages-select hal --cmake-args \
 
 如需重新构建，可先删除相对目录 `build/`、`install/` 和 `log/`，再执行上述命令。
 
-#### 2. 内置 CAN 配置与权限
+#### 2. 手动配置并检查 CAN 接口
 
-真实硬件模式下，节点在 `configure` 转换时自动将固定接口 `can3` 依次置为 down、配置为 125 kbps、再置为 up，随后绑定 SocketCAN 套接字。无需在终端中手动执行 `ip link` 命令。
+节点固定绑定 `can3`，但不负责配置或启用该接口。真实硬件模式下，请在启动节点前由系统管理员将 `can3` 配置为 125 kbps：
 
-该操作需要节点进程具有 `CAP_NET_ADMIN` 权限。若以普通用户启动而未授予此权限，`configure` 将失败并在日志中提示。可使用具有该权限的服务管理方式或以具备相应权限的用户启动节点。
+```bash
+sudo ip link set can3 down
+sudo ip link set can3 up type can bitrate 125000
+ip -details link show can3
+```
+
+若该命令失败，请先确认 AD10 已加载对应的 CAN 驱动且存在 `can3` 接口。节点仅能绑定已经存在且已启用的 SocketCAN 接口。
 
 使用 `candump` 观察节点发出的控制帧：
 
