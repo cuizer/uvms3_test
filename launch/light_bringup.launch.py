@@ -5,7 +5,7 @@ from launch.actions import ExecuteProcess, TimerAction, LogInfo
 
 def generate_launch_description():
     print("=========================================")
-    print("������ 锁定米文硬件底层物理坐标: gpiochip2 line 6")
+    print("������ 锁定米文硬件底层物理坐标: gpiochip2 line 79")
     print("=========================================")
 
     # 1. 核心节点定义 (直接注入已验证的真实底层字符设备坐标)
@@ -15,8 +15,8 @@ def generate_launch_description():
         name='hal_light_sw_pwm_node',
         output='screen',
         parameters=[{
-            'gpio_chip': 'gpiochip2',
-            'gpio_offset': 6,
+            'gpio_chip': 'gpiochip0',
+            'gpio_offset': 79,
             'active_low': False, # 根据万用表实测，高电平为导通
             'pwm_freq_hz': 50
         }]

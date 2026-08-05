@@ -60,7 +60,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/HalArmmotor.msg"
   "srv/HalArmmotorSrv.srv"
   "msg/CanFrameManipulator.msg" # 左边版本独有
-
+  "msg/HalLightControl.msg"
   DEPENDENCIES std_msgs builtin_interfaces
 )
 

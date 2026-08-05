@@ -17,7 +17,7 @@
 
 
 //#include "hal/msg/hal_antenna_control.hpp"
-//#include "hal/msg/hal_light_control.hpp"
+#include "hal/msg/hal_light_control.hpp"
 
 
 #include "hal/srv/hal_battery_control_srv.hpp"
@@ -66,7 +66,7 @@ public:
         // depth_image_sub_  = this->create_subscription<sensor_msgs::msg::Image>("/uvms/perception/depth",rclcpp::SensorDataQoS(),std::bind(&BspCommNode::depth_image_callback, this, std::placeholders::_1));
         
         //antenna_control_pub_    = this->create_publisher<hal::msg::HalAntennaControl>("/hal/antennacontrol", 10);
-        //light_control_pub_      = this->create_publisher<hal::msg::HalLightControl>("/hal/lightcontrol", 10);
+        light_control_pub_ = this->create_publisher<hal::msg::HalLightControl>("/hal/lightcontrol", 10);
         
         battery_control_client_ = this->create_client<hal::srv::HalBatteryControlSrv>("/hal/batterycontrol");
  
@@ -120,12 +120,17 @@ public:
     }
 
     CallbackReturn on_activate(const rclcpp_lifecycle::State &)
-    {
-        active_ = true;
-        udp_recv_running_ = true;
-        udp_recv_thread_ = std::thread(&BspCommNode::udp_receive_function, this);
-        return CallbackReturn::SUCCESS;
+{
+    active_ = true;
+    udp_recv_running_ = true;
+
+    if (light_control_pub_) {
+        light_control_pub_->on_activate();
     }
+
+    udp_recv_thread_ = std::thread(&BspCommNode::udp_receive_function, this);
+    return CallbackReturn::SUCCESS;
+}
 
     CallbackReturn on_deactivate(const rclcpp_lifecycle::State &)
     {
@@ -734,7 +739,7 @@ private:
     rclcpp::TimerBase::SharedPtr timer_;
     
    // rclcpp::Publisher<hal::msg::HalAntennaControl>::SharedPtr antenna_control_pub_;
-   // rclcpp::Publisher<hal::msg::HalLightControl>::SharedPtr light_control_pub_;
+    rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalLightControl>::SharedPtr light_control_pub_;
     rclcpp::Client<hal::srv::HalBatteryControlSrv>::SharedPtr battery_control_client_;
 
     std::optional<hal::msg::HalInertialnavi> inertial_data_;
@@ -781,7 +786,7 @@ private:
         switch(msg_id)
         {
              // 灯光控制
-            //case 0x30:{light_control(payload); break;}
+            case 0x30:{light_control(payload); break;}
             
             // 天线控制
             //case 0x31:
@@ -797,7 +802,7 @@ private:
     }
     
     // 灯光控制
-    /*
+    
     void light_control(const std::vector<uint8_t>& payload)
     {
         if(payload.size() != 1) {RCLCPP_WARN(this->get_logger(), "Light command payload length error: %ld", payload.size()); return;}
@@ -812,7 +817,7 @@ private:
 
         RCLCPP_INFO(this->get_logger(), "Publish light control command");
     }
-    */
+    
     // 天线控制 
     /*
     void antenna_control(const std::vector<uint8_t>& payload)
