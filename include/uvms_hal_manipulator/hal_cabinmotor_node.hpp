@@ -21,16 +21,12 @@
 namespace hal
 {
 
-struct MitLimits
+struct FeedbackRanges
 {
   double p_min{-12.5};
   double p_max{12.5};
   double v_min{-45.0};
   double v_max{45.0};
-  double kp_min{0.0};
-  double kp_max{500.0};
-  double kd_min{0.0};
-  double kd_max{5.0};
   double t_min{-18.0};
   double t_max{18.0};
 };
@@ -40,19 +36,15 @@ struct MechanicalLimits
   double position_min{-1.0};
   double position_max{1.0};
   double velocity_max{1.5};
-  double torque_max{5.0};
 };
 
-struct MitCommand
+struct PositionVelocityCommand
 {
   double position{0.0};
-  double velocity{0.0};
-  double kp{2.0};
-  double kd{1.0};
-  double torque_ff{0.0};
+  double velocity_limit{0.2};
 };
 
-struct MitFeedback
+struct MotorFeedback
 {
   uint8_t motor_id{0};
   uint8_t status_code{0};
@@ -74,15 +66,15 @@ struct CanFrame
 struct CabinMotorState
 {
   std::string name;
-  uint16_t can_id{0};
+  uint16_t device_id{0};
   uint16_t master_id{0};
 
-  MitLimits mit_limits;
+  FeedbackRanges feedback_ranges;
   MechanicalLimits mechanical_limits;
 
-  MitCommand desired_command;
-  MitCommand active_command;
-  MitFeedback feedback;
+  PositionVelocityCommand desired_command;
+  PositionVelocityCommand active_command;
+  MotorFeedback feedback;
 
   bool feedback_received{false};
   bool command_received{false};
@@ -97,16 +89,16 @@ struct CabinMotorState
   rclcpp::Time enable_command_time{0, 0, RCL_ROS_TIME};
 };
 
-class MitCanDriver
+class CabinMotorCanDriver
 {
 public:
   using ReceiveCallback = std::function<void(const CanFrame &)>;
 
-  MitCanDriver();
-  ~MitCanDriver();
+  CabinMotorCanDriver();
+  ~CabinMotorCanDriver();
 
-  MitCanDriver(const MitCanDriver &) = delete;
-  MitCanDriver & operator=(const MitCanDriver &) = delete;
+  CabinMotorCanDriver(const CabinMotorCanDriver &) = delete;
+  CabinMotorCanDriver & operator=(const CabinMotorCanDriver &) = delete;
 
   bool open(const std::string & interface_name, int retry_count, int retry_interval_ms);
   void close();
@@ -115,37 +107,31 @@ public:
   bool startReceive(const ReceiveCallback & callback);
   void stopReceive();
 
-  bool sendMitCommand(
-    uint16_t can_id,
-    const MitCommand & command,
-    const MitLimits & limits);
+  bool sendPositionVelocityCommand(
+    uint16_t device_id,
+    const PositionVelocityCommand & command);
 
-  bool sendEnable(uint16_t can_id);
-  bool sendDisable(uint16_t can_id);
-  bool sendClearFault(uint16_t can_id);
-  bool sendSetZero(uint16_t can_id);
+  bool sendEnable(uint16_t device_id);
+  bool sendDisable(uint16_t device_id);
+  bool sendClearFault(uint16_t device_id);
+  bool sendSetZero(uint16_t device_id);
 
-  MitFeedback parseFeedback(
+  MotorFeedback parseFeedback(
     const CanFrame & frame,
-    const MitLimits & limits) const;
+    const FeedbackRanges & ranges) const;
 
 private:
+  static constexpr uint16_t kPvIdOffset = 0x100;
+
   bool openOnce(const std::string & interface_name);
   bool sendFrame(
     uint16_t can_id,
     const std::array<uint8_t, 8> & data,
     uint8_t dlc = 8);
 
-  std::array<uint8_t, 8> packMitCommand(
-    const MitCommand & command,
-    const MitLimits & limits) const;
-
-  static uint32_t floatToUint(
-    double value,
-    double min_value,
-    double max_value,
-    uint8_t bits);
-
+  static uint16_t pvControlId(uint16_t device_id);
+  static std::array<uint8_t, 8> packPositionVelocityCommand(
+    const PositionVelocityCommand & command);
   static double uintToFloat(
     uint32_t value,
     double min_value,
@@ -171,24 +157,16 @@ private:
   using CallbackReturn =
     rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
-  CallbackReturn on_configure(
-    const rclcpp_lifecycle::State & previous_state) override;
-  CallbackReturn on_activate(
-    const rclcpp_lifecycle::State & previous_state) override;
-  CallbackReturn on_deactivate(
-    const rclcpp_lifecycle::State & previous_state) override;
-  CallbackReturn on_cleanup(
-    const rclcpp_lifecycle::State & previous_state) override;
-  CallbackReturn on_shutdown(
-    const rclcpp_lifecycle::State & previous_state) override;
-  CallbackReturn on_error(
-    const rclcpp_lifecycle::State & previous_state) override;
+  CallbackReturn on_configure(const rclcpp_lifecycle::State &) override;
+  CallbackReturn on_activate(const rclcpp_lifecycle::State &) override;
+  CallbackReturn on_deactivate(const rclcpp_lifecycle::State &) override;
+  CallbackReturn on_cleanup(const rclcpp_lifecycle::State &) override;
+  CallbackReturn on_shutdown(const rclcpp_lifecycle::State &) override;
+  CallbackReturn on_error(const rclcpp_lifecycle::State &) override;
 
   void declareParameters();
   bool loadParameters();
-  bool loadMotorParameters(
-    const std::string & prefix,
-    CabinMotorState & motor);
+  bool loadMotorParameters(const std::string & prefix, CabinMotorState & motor);
   bool validateMotorParameters(const CabinMotorState & motor) const;
 
   void commandCallback(
@@ -197,10 +175,10 @@ private:
     const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
     std::shared_ptr<std_srvs::srv::SetBool::Response> response);
   void clearFaultCallback(
-    const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+    const std::shared_ptr<std_srvs::srv::Trigger::Request>,
     std::shared_ptr<std_srvs::srv::Trigger::Response> response);
   void setZeroCallback(
-    const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+    const std::shared_ptr<std_srvs::srv::Trigger::Request>,
     std::shared_ptr<std_srvs::srv::Trigger::Response> response);
 
   void handleCanFrame(const CanFrame & frame);
@@ -212,14 +190,15 @@ private:
     uint8_t feedback_id);
 
   bool allFeedbackReady() const;
+  bool waitForEnableFeedback();
   bool enableAllMotors();
   void disableAllMotors();
   void synchronizeHoldPositions();
 
-  MitCommand makeHoldCommand(const CabinMotorState & motor) const;
-  MitCommand applyMechanicalLimits(
+  PositionVelocityCommand makeHoldCommand(const CabinMotorState & motor) const;
+  PositionVelocityCommand applyMechanicalLimits(
     const CabinMotorState & motor,
-    const MitCommand & command,
+    const PositionVelocityCommand & command,
     bool & was_clamped) const;
 
   bool isFeedbackTimedOut(
@@ -234,8 +213,9 @@ private:
   static std::string statusCodeToString(uint8_t status_code);
   static double clampValue(double value, double min_value, double max_value);
 
-  std::array<CabinMotorState, 2> motors_{};
-  std::unique_ptr<MitCanDriver> can_driver_;
+  static constexpr std::size_t kMotorCount = 1;
+  std::array<CabinMotorState, kMotorCount> motors_{};
+  std::unique_ptr<CabinMotorCanDriver> can_driver_;
   mutable std::mutex motor_mutex_;
 
   rclcpp::Subscription<trajectory_msgs::msg::JointTrajectoryPoint>::SharedPtr command_sub_;
@@ -256,15 +236,11 @@ private:
 
   double command_timeout_sec_{0.2};
   double feedback_timeout_sec_{0.2};
-  double enable_confirmation_timeout_sec_{0.5};
-  double default_kp_{2.0};
-  double default_kd_{1.0};
-  double hold_kp_{2.0};
-  double hold_kd_{1.0};
+  double enable_confirmation_timeout_sec_{1.0};
+  double hold_velocity_limit_{0.2};
   double max_mos_temperature_{55.0};
   double max_rotor_temperature_{55.0};
 
-  bool require_feedback_before_activate_{true};
   bool stop_all_on_single_fault_{true};
   std::atomic<bool> node_active_{false};
   std::atomic<bool> emergency_stop_active_{false};

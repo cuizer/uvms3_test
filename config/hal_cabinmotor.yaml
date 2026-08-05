@@ -5,62 +5,38 @@ hal_cabinmotor_node:
     can_retry_count: 3
     can_retry_interval_ms: 1000
 
-    control_period_ms: 10           # 100 Hz MIT控制周期
-    state_publish_period_ms: 20     # 50 Hz状态发布周期
+    control_period_ms: 10
+    state_publish_period_ms: 20
     command_timeout_sec: 0.2
     feedback_timeout_sec: 0.2
-    enable_confirmation_timeout_sec: 0.5
+    enable_confirmation_timeout_sec: 1.0
 
-    require_feedback_before_activate: true
+    # 激活后或指令超时后，以当前反馈位置作为保持目标时使用的速度上限。
+    hold_velocity_limit: 0.05
+
     stop_all_on_single_fault: true
 
-    default_kp: 2.0                 # 正常位置控制默认刚度
-    default_kd: 1.0                 # 正常位置控制默认阻尼
-    hold_kp: 2.0                    # 激活/命令超时后的保持刚度
-    hold_kd: 1.0                    # 激活/命令超时后的保持阻尼
-
-    # 岸上调试建议不超过55℃；水下正式阈值应按厂家和实际散热条件重新确认。
+    # 岸上空载测试保护阈值；正式水下运行需依据实际要求重新确认。
     max_mos_temperature: 55.0
     max_rotor_temperature: 55.0
 
+    # 单电机测试版本仅启用设备ID 0x13。
     motor_13:
       name: "cabin_motor_13"
-      can_id: 19                    # 0x13，MIT控制帧发送ID
-      master_id: 0                 # 反馈帧ID，必须与调试助手Master ID一致
-      mit:
-        p_min: -12.5
-        p_max: 12.5
-        v_min: -45.0
-        v_max: 45.0
-        kp_min: 0.0
-        kp_max: 500.0
-        kd_min: 0.0
-        kd_max: 5.0
-        t_min: -18.0
-        t_max: 18.0
-      mechanical:
-        position_min: -1.0         # 机械允许范围，需按舱段结构重新确认
-        position_max: 1.0
-        velocity_max: 1.5
-        torque_max: 5.0
+      device_id: 19
+      master_id: 19
 
-    motor_15:
-      name: "cabin_motor_15"
-      can_id: 21                    # 0x15，MIT控制帧发送ID
-      master_id: 0                 # 反馈帧ID，必须与调试助手Master ID一致
-      mit:
+      # 必须与调试助手中的 PMAX、VMAX、TMAX 完全一致。
+      feedback:
         p_min: -12.5
         p_max: 12.5
         v_min: -45.0
         v_max: 45.0
-        kp_min: 0.0
-        kp_max: 500.0
-        kd_min: 0.0
-        kd_max: 5.0
         t_min: -18.0
         t_max: 18.0
+
+      # 以下为首次空载测试占位限值，实机测试前应按机构安全范围修改。
       mechanical:
-        position_min: -1.0         # 机械允许范围，需按舱段结构重新确认
-        position_max: 1.0
-        velocity_max: 1.5
-        torque_max: 5.0
+        position_min: -3.0
+        position_max: 3.0
+        velocity_max: 2.0
