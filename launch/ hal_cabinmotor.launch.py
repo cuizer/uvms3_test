@@ -22,8 +22,7 @@ def generate_launch_description() -> LaunchDescription:
         emulate_tty=True,
     )
 
-    # 仅创建生命周期节点，不自动configure或activate。
-    # 启动后手动执行：
+    # 仅创建独立的舱段生命周期节点；当前为0x13单电机测试版本。
     # ros2 lifecycle set /hal_cabinmotor_node configure
     # ros2 lifecycle set /hal_cabinmotor_node activate
     return LaunchDescription([cabinmotor_node])
