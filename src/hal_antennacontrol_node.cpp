@@ -1,241 +1,323 @@
 #include <memory>
-#include <string>
-#include <cstring>
-#include <vector>
-#include <algorithm>
-#include <iostream>
 #include <thread>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <algorithm>
+#include <cstring>
+
+// Linux SocketCAN 底层核心库
+#include <linux/can.h>
+#include <linux/can/raw.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
-#include "lifecycle_msgs/msg/state.hpp"
-#include "std_msgs/msg/u_int8.hpp"
-#include "std_msgs/msg/float32.hpp"
 
-// 引入系统自定义消息
-#include "hal/msg/hal_antenna.hpp"
-#include "hal/msg/can_msg_in.hpp"
-#include "hal/msg/can_msg_out.hpp"
+// 引入您的自定义消息头文件 (修正名称以匹配 BSP 节点)
 
+#include "hal/msg/hal_antenna.hpp"          // 状态反馈消息
+#include "hal/msg/hal_antenna_control.hpp"  // 控制指令消息
+
+using namespace std::chrono_literals;
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
-class HalAntennaControlNode : public rclcpp_lifecycle::LifecycleNode {
+class HalAntennaControlNode : public rclcpp_lifecycle::LifecycleNode
+{
 public:
-    explicit HalAntennaControlNode(const std::string & node_name)
-    : rclcpp_lifecycle::LifecycleNode(node_name) {
-        // 【Foxy 适配核心】: 参数声明必须严格放置在构造函数中
-        // 防止生命周期节点多次触发 Configure 时抛出 ParameterAlreadyDeclaredException
-        this->declare_parameter<int>("motor_run_speed", 1800);
-        this->declare_parameter<int>("lsb_down", 0);
-        this->declare_parameter<int>("lsb_up", -12500000);
+    explicit HalAntennaControlNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions())
+    : rclcpp_lifecycle::LifecycleNode("hal_antenna_lifecycle_node", options),
+      can_socket_(-1),
+      can_rx_running_(false)
+    {
+        RCLCPP_INFO(this->get_logger(), ">>> [HAL天线大脑] 已构建，准备加载直连 CAN 驱动 <<<");
+        
+        // 声明参数：允许启动时通过 YAML 或命令行修改物理接口与运动限制
+        this->declare_parameter<std::string>("can_interface", "can2");
+        this->declare_parameter<int>("motor_tx_id", 0x141);
+        this->declare_parameter<int>("speed_dps", 1800);
+        this->declare_parameter<int>("lsb_down_limit", 0);
+        this->declare_parameter<int>("lsb_up_limit", -12500000);
     }
 
-    CallbackReturn on_configure(const rclcpp_lifecycle::State &) override {
-        RCLCPP_INFO(this->get_logger(), "[系统] 正在配置天线控制复合模式节点 (环境: ROS 2 Foxy)...");
+    ~HalAntennaControlNode()
+    {
+        close_can_socket();
+    }
 
-        // 1. 动态获取在构造函数中已声明的物理参数
-        motor_run_speed_ = this->get_parameter("motor_run_speed").as_int();
-        lsb_down_ = this->get_parameter("lsb_down").as_int();
-        lsb_up_ = this->get_parameter("lsb_up").as_int();
+protected:
+    CallbackReturn on_configure(const rclcpp_lifecycle::State &) override
+    {
+        can_interface_ = this->get_parameter("can_interface").as_string();
+        motor_tx_id_   = this->get_parameter("motor_tx_id").as_int();
+        speed_dps_     = this->get_parameter("speed_dps").as_int();
+        lsb_down_      = this->get_parameter("lsb_down_limit").as_int();
+        lsb_up_        = this->get_parameter("lsb_up_limit").as_int();
 
-        RCLCPP_INFO(this->get_logger(), "[参数] 标称速度: %d dps, 下限: %d, 上限: %d", 
-                    motor_run_speed_, lsb_down_, lsb_up_);
+        RCLCPP_INFO(this->get_logger(), "--- [配置中] 正在独占锁定网卡: %s ---", can_interface_.c_str());
 
-        // 【Foxy 适配核心】: 显式使用 rclcpp::QoS 避免隐式转换引发编译器警告或订阅失败
-        rclcpp::QoS qos_profile(10);
+        // 1. 创建 CAN 原生套接字
+        can_socket_ = socket(PF_CAN, SOCK_RAW, CAN_RAW);
+        if (can_socket_ < 0) {
+            RCLCPP_FATAL(this->get_logger(), "❌ 创建 SocketCAN 失败！(errno: %d)", errno);
+            return CallbackReturn::FAILURE;
+        }
 
-        // 2. 注册标准安全控制通道 (接收 0~6 状态指令)
-        antenna_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
-            "/hal_antennacontrol_srv", qos_profile,
-            std::bind(&HalAntennaControlNode::antenna_callback, this, std::placeholders::_1));
+        // 2. 获取网卡索引
+        struct ifreq ifr;
+        strncpy(ifr.ifr_name, can_interface_.c_str(), IFNAMSIZ - 1);
+        ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+        if (ioctl(can_socket_, SIOCGIFINDEX, &ifr) < 0) {
+            RCLCPP_FATAL(this->get_logger(), "❌ 无法找到网卡 %s，请确认它是否处于 UP 状态！", can_interface_.c_str());
+            close_can_socket();
+            return CallbackReturn::FAILURE;
+        }
 
-        // 3. 注册越权自定义控制通道 (断电寻零、强压应急专用)
-        override_angle_sub_ = this->create_subscription<std_msgs::msg::Float32>(
-            "/hal_antennacontrol_override_angle", qos_profile,
-            std::bind(&HalAntennaControlNode::override_angle_callback, this, std::placeholders::_1));
+        // 3. 绑定套接字到指定网卡
+        struct sockaddr_can addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.can_family = AF_CAN;
+        addr.can_ifindex = ifr.ifr_ifindex;
+        if (bind(can_socket_, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            RCLCPP_FATAL(this->get_logger(), "❌ 无法绑定套接字到 %s！", can_interface_.c_str());
+            close_can_socket();
+            return CallbackReturn::FAILURE;
+        }
 
-        // 4. 注册底层的 CAN 总线接收与发送通道
-        canin_sub_ = this->create_subscription<hal::msg::CanMsgIn>(
-            "/hal/canin", qos_profile,
-            std::bind(&HalAntennaControlNode::canin_callback, this, std::placeholders::_1));
+        // 4. 设置接收超时（防止读取线程死锁）
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 100000; // 100 毫秒超时
+        setsockopt(can_socket_, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
 
-        status_pub_ = this->create_publisher<hal::msg::HalAntenna>("/hal/antenna", qos_profile);
-        canout_pub_ = this->create_publisher<hal::msg::CanMsgOut>("/hal/canout", qos_profile);
+        // 5. 创建 ROS 2 订阅与发布 (修正类型与话题，与 BSP 节点完全对齐)
+        auto qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
+        cmd_sub_ = this->create_subscription<hal::msg::HalAntennaControl>(
+            "/hal/antennacontrol", qos, 
+            std::bind(&HalAntennaControlNode::command_callback, this, std::placeholders::_1)
+        );
 
+        state_pub_ = this->create_publisher<hal::msg::HalAntenna>("/hal/antenna", 10);
+
+        RCLCPP_INFO(this->get_logger(), "������ [配置成功] 网卡 %s 绑定完成，系统已准备就绪。", can_interface_.c_str());
         return CallbackReturn::SUCCESS;
     }
 
-    CallbackReturn on_activate(const rclcpp_lifecycle::State & state) override {
-        rclcpp_lifecycle::LifecycleNode::on_activate(state);
-        status_pub_->on_activate();
-        canout_pub_->on_activate();
-        RCLCPP_INFO(this->get_logger(), "[系统] 节点已激活，双通道控制就绪。等待指令...");
+    CallbackReturn on_activate(const rclcpp_lifecycle::State & state) override
+    {
+        LifecycleNode::on_activate(state);
+        
+        if (state_pub_) { state_pub_->on_activate(); }
+
+        // 启动后台 CAN 帧接收线程
+        can_rx_running_ = true;
+        rx_thread_ = std::thread(&HalAntennaControlNode::can_rx_loop, this);
+        
+        RCLCPP_WARN(this->get_logger(), "������������������ [节点已激活] 监听线程已拉起，随时准备收发运动指令！");
         return CallbackReturn::SUCCESS;
     }
 
-    CallbackReturn on_deactivate(const rclcpp_lifecycle::State & state) override {
-        send_can_cmd(0x81, 0x00); // 退出时强制停止电机
-        status_pub_->on_deactivate();
-        canout_pub_->on_deactivate();
-        rclcpp_lifecycle::LifecycleNode::on_deactivate(state);
-        RCLCPP_INFO(this->get_logger(), "[系统] 节点已失活，电机停转。");
+    CallbackReturn on_deactivate(const rclcpp_lifecycle::State & state) override
+    {
+        LifecycleNode::on_deactivate(state);
+        if (state_pub_) { state_pub_->on_deactivate(); }
+        
+        RCLCPP_WARN(this->get_logger(), "������ [节点已钝化] 正在关闭底层监听线程...");
+        stop_rx_thread();
+        return CallbackReturn::SUCCESS;
+    }
+
+    CallbackReturn on_cleanup(const rclcpp_lifecycle::State &) override
+    {
+        cmd_sub_.reset();
+        state_pub_.reset();
+        close_can_socket();
+        return CallbackReturn::SUCCESS;
+    }
+
+    CallbackReturn on_shutdown(const rclcpp_lifecycle::State &) override
+    {
+        stop_rx_thread();
+        close_can_socket();
         return CallbackReturn::SUCCESS;
     }
 
 private:
-    // --- 内部核心物理参数缓存 ---
-    uint16_t motor_run_speed_;    
-    int32_t lsb_down_;               
-    int32_t lsb_up_;         
-
-    // --- 标准安全指令回调 (0-6) ---
-    void antenna_callback(const std_msgs::msg::UInt8::SharedPtr msg) {
-        if (this->get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
-            RCLCPP_WARN(this->get_logger(), "[警告] 节点未激活，静默拦截标准请求: %d", (int)msg->data);
+    void command_callback(const hal::msg::HalAntennaControl::SharedPtr msg)
+    {
+        if (this->get_current_state().id() != 3) {
+            RCLCPP_WARN(this->get_logger(), "⚠️ 节点未处于 ACTIVE 状态，拒绝执行指令！");
             return;
         }
 
-        RCLCPP_INFO(this->get_logger(), "\n[操作] 收到标准控制请求: %d", (int)msg->data);
-        switch (msg->data) {
-            case 0: // 复合上升序列
-                RCLCPP_INFO(this->get_logger(), ">> 启动标准上升序列 -> 运动至绝对位置: %d LSB", lsb_up_);
-                execute_hardware_sequence();
-                run_motor_absolute(lsb_up_);
+        uint8_t cmd_type = msg->cmd_type;
+        float coeff = msg->target_coeff;
+        RCLCPP_INFO(this->get_logger(), "【大脑接收指令】类型: %d, 目标系数: %.2f", cmd_type, coeff);
+
+        // 使用硬编码数字，防止编译时找不到 msg 常量
+        switch (cmd_type) {
+            case 2: // CMD_UNLOCK_ONLY
+                // 仅解抱闸
+                send_motor_cmd(0x8C, 0x01, 0, 0);
+                RCLCPP_INFO(this->get_logger(), "������ 发送解锁指令 (0x8C)");
                 break;
 
-            case 1: // 复合下降序列
-                RCLCPP_INFO(this->get_logger(), ">> 启动标准下降序列 -> 运动至绝对位置: %d LSB", lsb_down_);
-                execute_hardware_sequence();
-                run_motor_absolute(lsb_down_);
+            case 0: // CMD_UP
+                execute_move(255.0f);
                 break;
 
-            case 2: send_can_cmd(0x8C, 0x01); break; // 仅手动释放抱闸
-            case 3: send_can_cmd(0x8C, 0x00); break; // 仅手动锁死抱闸
-            case 4: send_can_cmd(0x81, 0x00); break; // 仅紧急停止电机
-            case 5: send_can_cmd(0x8C, 0x10); break; // 仅查询抱闸状态
-            case 6: send_can_cmd(0x92, 0x00); break; // 仅查询当前位置
-            default: RCLCPP_WARN(this->get_logger(), "[警告] 未知指令编号!"); break;
+            case 1: // CMD_DOWN
+                execute_move(0.0f);
+                break;
+
+            case 3: // CMD_CUSTOM_COEFF
+                execute_move(coeff);
+                break;
+
+            case 4: // CMD_ESTOP (急停)
+                // 具体的急停 CAN 指令码请参考电机手册，这里假设 0x8C, byte1=0x00 表示抱闸/急停
+                send_motor_cmd(0x8C, 0x00, 0, 0); 
+                RCLCPP_WARN(this->get_logger(), "������ 触发急停指令！电机已锁定");
+                break;            
+
+            case 5: // CMD_CLEAR_ESTOP
+                send_motor_cmd(0x88, 0x00, 0, 0); // 清除故障
+                RCLCPP_INFO(this->get_logger(), "������ 发送清除故障指令 (0x88)");
+                break;
+
+            default:
+                RCLCPP_WARN(this->get_logger(), "❌ 未知指令类型");
+                break;
         }
     }
 
-    // --- 越权增量角度回调 (断电强压恢复专用通道) ---
-    void override_angle_callback(const std_msgs::msg::Float32::SharedPtr msg) {
-        if (this->get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
-            RCLCPP_WARN(this->get_logger(), "[警告] 节点未激活，越权控制被拦截！");
-            return;
-        }
-
-        double target_degree = msg->data;
-        // 将输入的浮点数角度转换为相对位移的 LSB 脉冲增量 (1度 = 10000 LSB)
-        int32_t increment_lsb = static_cast<int32_t>(target_degree * 10000.0);
-
-        RCLCPP_WARN(this->get_logger(), "\n[越权操作] 拦截到增量指令: %.2f 度 (LSB相对增量: %d)", target_degree, increment_lsb);
-        RCLCPP_INFO(this->get_logger(), ">> 正在无视固件软限位执行：清错 ➔ 解锁 ➔ 相对增量强推下行");
-
-        // 执行严格的安全硬件复位与解锁时序
-        execute_hardware_sequence();
-        
-        // 【核心破局】：摒弃 0xA4 绝对位置指令，改用 0xA8 相对增量闭环控制
-        run_motor_relative(increment_lsb); 
-    }
-
-    // --- 严格的底层硬件动作时序保证 ---
-    void execute_hardware_sequence() {
-        // 1. 必须先发 0x88 清除伺服驱动板可能存在的欠压/堵转故障，并初始化使能
-        send_can_cmd(0x88, 0x00); 
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        
-        // 2. 确认使能成功后，再发 0x8C 释放电磁抱闸（刹车通电脱力）
-        send_can_cmd(0x8C, 0x01); 
+    void execute_move(float coeff)
+    {
+        // 核心时序保护：1.清错 -> 2.等待 -> 3.解锁 -> 4.等待 -> 5.运动
+        send_motor_cmd(0x88, 0x00, 0, 0); // Clear Fault
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        
+        send_motor_cmd(0x8C, 0x01, 0, 0); // Release Brake
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        if (coeff >= 0.0f) {
+            // 正常绝对运动模式 (0xA4)
+            coeff = std::clamp(coeff, 0.0f, 255.0f);
+            int32_t target_lsb = lsb_down_ + static_cast<int32_t>((coeff / 255.0f) * (lsb_up_ - lsb_down_));
+            send_motor_cmd(0xA4, 0x00, speed_dps_, target_lsb);
+            RCLCPP_INFO(this->get_logger(), "������ [绝对运动] 系数: %.1f -> 目标 LSB: %d", coeff, target_lsb);
+        } else {
+            // 异常恢复：负系数增量向下寻零模式 (0xA8)
+            int32_t relative_lsb = static_cast<int32_t>((std::abs(coeff) / 255.0f) * std::abs(lsb_up_ - lsb_down_));
+            // 向下运动（正数增量，具体符号看您的电机固件定义，这里假设正数为向下）
+            send_motor_cmd(0xA8, 0x00, speed_dps_, relative_lsb);
+            RCLCPP_WARN(this->get_logger(), "⚠️ [相对降维寻零] 系数: %.1f -> 增量 LSB: %d", coeff, relative_lsb);
+        }
     }
 
-    // --- CAN 底层数据接收与解析 ---
-    void canin_callback(const hal::msg::CanMsgIn::SharedPtr msg) {
-        if (msg->id == 0x141 || msg->id == 0x181) {
-            // 解析电机多圈位置反馈 (0x92)
-            if (msg->data[0] == 0x92) {
-                uint64_t raw = 0;
-                for (int i = 0; i < 7; ++i) { raw |= (static_cast<uint64_t>(msg->data[i + 1]) << (8 * i)); }
-                if (raw & (1ULL << 55)) raw |= 0xFF00000000000000ULL; // 56位有符号符号位扩展
+    void send_motor_cmd(uint8_t cmd_byte, uint8_t byte1, uint16_t speed, int32_t lsb)
+    {
+        if (can_socket_ < 0) return;
 
-                int64_t motor_angle_lsb = static_cast<int64_t>(raw);
-                double degree = motor_angle_lsb / 10000.0;
+        struct can_frame frame;
+        memset(&frame, 0, sizeof(frame));
+        frame.can_id = motor_tx_id_;
+        frame.can_dlc = 8;
 
-                RCLCPP_INFO(this->get_logger(), "[反馈] 当前电机物理多圈位置: %.2f 度", degree);
-            }
-            // 解析抱闸状态反馈 (0x8C)
-            else if (msg->data[0] == 0x8C) {
-                uint8_t brake = msg->data[1];
-                std::string brake_status_str = (brake == 0x01) ? "已释放(通电运行)" : "已锁定(断电刹车)";
-                RCLCPP_INFO(this->get_logger(), "[反馈] 抱闸状态: %s", brake_status_str.c_str());
+        // 小端字节序封装
+        frame.data[0] = cmd_byte;
+        frame.data[1] = byte1;
+        frame.data[2] = speed & 0xFF;
+        frame.data[3] = (speed >> 8) & 0xFF;
+        frame.data[4] = lsb & 0xFF;
+        frame.data[5] = (lsb >> 8) & 0xFF;
+        frame.data[6] = (lsb >> 16) & 0xFF;
+        frame.data[7] = (lsb >> 24) & 0xFF;
 
-                hal::msg::HalAntenna s_msg;
-                s_msg.brake_status = brake;
-                status_pub_->publish(s_msg);
+        ssize_t bytes_sent = write(can_socket_, &frame, sizeof(struct can_frame));
+        if (bytes_sent != sizeof(struct can_frame)) {
+            RCLCPP_ERROR(this->get_logger(), "������ [硬件拒发] 无法向 CAN 总线写入数据！可能是硬件短路或进入 Bus-Off 状态！");
+        } else {
+            RCLCPP_DEBUG(this->get_logger(), "[TX -> %s] ID: 0x%03X | CMD: 0x%02X", can_interface_.c_str(), frame.can_id, cmd_byte);
+        }
+    }
+
+    void can_rx_loop()
+    {
+        struct can_frame frame;
+        while (can_rx_running_) {
+            ssize_t bytes_read = read(can_socket_, &frame, sizeof(struct can_frame));
+            
+            if (bytes_read > 0) {
+                // 判断是否为电机的反馈包 (通常是 0x141 自身或 0x241，这里打印以便您分析)
+                // 如果确定了 ID，可以在这里加过滤逻辑。
+                // 示例：解析回传的当前位置并反向算成系数发布出去
+                if (frame.can_dlc >= 8 && frame.data[0] == 0xA4) {
+                    // 这是电机回传的位置反馈包
+                    int32_t current_lsb = (frame.data[7] << 24) | (frame.data[6] << 16) | (frame.data[5] << 8) | frame.data[4];
+                    
+                    hal::msg::HalAntenna state_msg;
+                    state_msg.timestamp = this->now().nanoseconds();
+                    
+                    // 逆向换算系数 
+                    float current_coeff = 255.0f * (static_cast<float>(current_lsb - lsb_down_) / static_cast<float>(lsb_up_ - lsb_down_));
+                    state_msg.total_angle = static_cast<double>(current_coeff);
+                    state_msg.brake_status = 1;      // 假设运行时抱闸已解开
+                    state_msg.running_status = 0;    // 状态机精简处理
+                    
+                    state_pub_->publish(state_msg);
+                }
+            } else if (bytes_read < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                RCLCPP_WARN(this->get_logger(), "CAN 接收发生硬件错误，errno: %d", errno);
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
         }
     }
 
-    // --- 基础 CAN 命令打包函数 ---
-    void send_can_cmd(uint8_t b0, uint8_t b1) {
-        hal::msg::CanMsgOut msg;
-        msg.id = 0x141; msg.dlc = 8;
-        std::fill(msg.data.begin(), msg.data.end(), 0x00);
-        msg.data[0] = b0; msg.data[1] = b1;
-        canout_pub_->publish(msg);
+    void stop_rx_thread()
+    {
+        can_rx_running_ = false;
+        if (rx_thread_.joinable()) {
+            rx_thread_.join();
+        }
     }
 
-    // --- 【常态武器】发送 0xA4 绝对位置闭环指令 ---
-    void run_motor_absolute(int32_t target) {
-        hal::msg::CanMsgOut msg;
-        msg.id = 0x141; msg.dlc = 8;
-        std::fill(msg.data.begin(), msg.data.end(), 0x00);
-        msg.data[0] = 0xA4;
-        msg.data[2] = motor_run_speed_ & 0xFF; 
-        msg.data[3] = (motor_run_speed_ >> 8) & 0xFF; 
-        msg.data[4] = target & 0xFF;
-        msg.data[5] = (target >> 8) & 0xFF;
-        msg.data[6] = (target >> 16) & 0xFF;
-        msg.data[7] = (target >> 24) & 0xFF;
-        canout_pub_->publish(msg);
-        RCLCPP_INFO(this->get_logger(), "[CAN发送] 绝对位置控制(0xA4) | 目标: %d LSB", target);
+    void close_can_socket()
+    {
+        if (can_socket_ >= 0) {
+            close(can_socket_);
+            can_socket_ = -1;
+        }
     }
 
-    // --- 【应急武器】发送 0xA8 相对位置（增量）控制指令 ---
-    void run_motor_relative(int32_t increment) {
-        hal::msg::CanMsgOut msg;
-        msg.id = 0x141; msg.dlc = 8;
-        std::fill(msg.data.begin(), msg.data.end(), 0x00);
-        msg.data[0] = 0xA8; // 相对增量模式代码
-        msg.data[2] = motor_run_speed_ & 0xFF; 
-        msg.data[3] = (motor_run_speed_ >> 8) & 0xFF; 
-        msg.data[4] = increment & 0xFF; 
-        msg.data[5] = (increment >> 8) & 0xFF;
-        msg.data[6] = (increment >> 16) & 0xFF; 
-        msg.data[7] = (increment >> 24) & 0xFF;
-        canout_pub_->publish(msg);
-        RCLCPP_INFO(this->get_logger(), "[CAN发送] 相对增量控制(0xA8) | 增量: %d LSB", increment);
-    }
+    // 成员变量
+    std::string can_interface_;
+    int motor_tx_id_;
+    int speed_dps_;
+    int lsb_down_;
+    int lsb_up_;
 
-    // --- 成员变量 ---
-    rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr antenna_sub_;
-    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr override_angle_sub_;
-    rclcpp::Subscription<hal::msg::CanMsgIn>::SharedPtr canin_sub_;
-    rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalAntenna>::SharedPtr status_pub_;
-    rclcpp_lifecycle::LifecyclePublisher<hal::msg::CanMsgOut>::SharedPtr canout_pub_;
+    int can_socket_;
+    std::atomic<bool> can_rx_running_;
+    std::thread rx_thread_;
+
+    rclcpp::Subscription<hal::msg::HalAntennaControl>::SharedPtr cmd_sub_;
+    rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalAntenna>::SharedPtr state_pub_;
 };
 
-int main(int argc, char * argv[]) {
+int main(int argc, char ** argv)
+{
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<HalAntennaControlNode>("hal_antennacontrol_node");
+    rclcpp::NodeOptions options;
+    auto node = std::make_shared<HalAntennaControlNode>(options);
     
-    // 【Foxy 适配】保持多线程执行器，确保底层反馈高频解析不受控制回调时的延时阻塞
-    rclcpp::executors::MultiThreadedExecutor executor;
-    executor.add_node(node->get_node_base_interface());
-    executor.spin();
+    rclcpp::executors::SingleThreadedExecutor exe;
+    exe.add_node(node->get_node_base_interface());
+    exe.spin();
     
     rclcpp::shutdown();
     return 0;

@@ -16,7 +16,7 @@
 #include "hal/msg/hal_antenna.hpp"
 
 
-//#include "hal/msg/hal_antenna_control.hpp"
+#include "hal/msg/hal_antenna_control.hpp"
 #include "hal/msg/hal_light_control.hpp"
 
 
@@ -65,7 +65,7 @@ public:
         // color_image_sub_  = this->create_subscription<sensor_msgs::msg::Image>("/uvms/perception/image_raw",rclcpp::SensorDataQoS(),std::bind(&BspCommNode::color_image_callback, this, std::placeholders::_1));
         // depth_image_sub_  = this->create_subscription<sensor_msgs::msg::Image>("/uvms/perception/depth",rclcpp::SensorDataQoS(),std::bind(&BspCommNode::depth_image_callback, this, std::placeholders::_1));
         
-        //antenna_control_pub_    = this->create_publisher<hal::msg::HalAntennaControl>("/hal/antennacontrol", 10);
+        antenna_control_pub_    = this->create_publisher<hal::msg::HalAntennaControl>("/hal/antennacontrol", 10);
         light_control_pub_ = this->create_publisher<hal::msg::HalLightControl>("/hal/lightcontrol", 10);
         
         battery_control_client_ = this->create_client<hal::srv::HalBatteryControlSrv>("/hal/batterycontrol");
@@ -738,7 +738,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
     
-   // rclcpp::Publisher<hal::msg::HalAntennaControl>::SharedPtr antenna_control_pub_;
+    rclcpp::Publisher<hal::msg::HalAntennaControl>::SharedPtr antenna_control_pub_;
     rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalLightControl>::SharedPtr light_control_pub_;
     rclcpp::Client<hal::srv::HalBatteryControlSrv>::SharedPtr battery_control_client_;
 
@@ -789,8 +789,8 @@ private:
             case 0x30:{light_control(payload); break;}
             
             // 天线控制
-            //case 0x31:
-            //{antenna_control(payload); break;}
+            case 0x31:
+            {antenna_control(payload); break;}
             
             // 电池控制
             case 0x35:
@@ -819,7 +819,7 @@ private:
     }
     
     // 天线控制 
-    /*
+    
     void antenna_control(const std::vector<uint8_t>& payload)
     {
         if(payload.size() != 5) {RCLCPP_WARN(this->get_logger(), "Antenna command payload length error: %ld", payload.size()); return;}
@@ -844,7 +844,7 @@ private:
 
         RCLCPP_INFO(this->get_logger(), "Published /hal/antenna_control");
     }
-    */
+    
     void battery_control(const std::vector<uint8_t>& payload)
     {
         if (!battery_control_client_->service_is_ready()) {RCLCPP_WARN(this->get_logger(), "/hal/batterycontrol service not ready"); return;}

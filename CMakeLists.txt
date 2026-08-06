@@ -52,6 +52,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/HalInertialnavi.msg"
   "msg/HalDvl.msg"
   "msg/HalDepthsensor.msg"
+  "msg/HalAntennaControl.msg"
   "msg/HalAntenna.msg"
   "msg/CanMsgIn.msg"
   "msg/CanMsgOut.msg"

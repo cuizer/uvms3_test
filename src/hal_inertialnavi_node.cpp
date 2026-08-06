@@ -63,8 +63,8 @@ public:
     HalInertialNaviNode(const std::string & node_name)
     : rclcpp_lifecycle::LifecycleNode(node_name)
     {
-        this->declare_parameter<std::string>("ins_port_name", "/dev/ttyUART_485_422_A"); 
-        this->declare_parameter<std::string>("dvl_port_name", "/dev/ttyUART_232_A"); 
+        this->declare_parameter<std::string>("ins_port_name", "/dev/ttyUART_485_422_B"); 
+        this->declare_parameter<std::string>("dvl_port_name", "/dev/ttyUART_485_422_A"); 
         cached_msg_.timestamp = 0;
         cached_msg_.connection_status = 0;
     }
