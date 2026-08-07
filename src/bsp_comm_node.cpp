@@ -128,6 +128,11 @@ public:
         light_control_pub_->on_activate();
     }
 
+    if (antenna_control_pub_) {
+        antenna_control_pub_->on_activate();
+    }
+
+
     udp_recv_thread_ = std::thread(&BspCommNode::udp_receive_function, this);
     return CallbackReturn::SUCCESS;
 }
@@ -738,7 +743,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
     
-    rclcpp::Publisher<hal::msg::HalAntennaControl>::SharedPtr antenna_control_pub_;
+    rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalAntennaControl>::SharedPtr antenna_control_pub_;
     rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalLightControl>::SharedPtr light_control_pub_;
     rclcpp::Client<hal::srv::HalBatteryControlSrv>::SharedPtr battery_control_client_;
 
