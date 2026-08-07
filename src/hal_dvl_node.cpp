@@ -1,7 +1,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include "hal/msg/hal_dvl.hpp" 
-#include <std_srvs/srv/set_bool.hpp>
+#include <std_srvs/srv/set_bool.hpp> // 【新增】用于工作模式切换的标准服务
 #include <thread>
 #include <mutex>
 #include <chrono>
@@ -9,8 +9,7 @@
 #include <string>
 #include <sstream> 
 #include <atomic>
-#include <condition_variable>
-#include <iomanip> // 【新增】用于 formatted hex 输出
+#include <condition_variable> // 【新增】用于服务线程与接收线程同步
 
 // 引入 Linux 底层串口所需的系统头文件
 #include <fcntl.h>
@@ -23,21 +22,6 @@
 #include <sys/select.h> 
 
 #include "app/udp_ports.hpp"
-
-// 波特率转换辅助函数
-speed_t get_baud_rate_constant(int baud) {
-    switch (baud) {
-        case 9600:   return B9600;
-        case 19200:  return B19200;
-        case 38400:  return B38400;
-        case 57600:  return B57600;
-        case 115200: return B115200;
-        case 230400: return B230400;
-        case 460800: return B460800;
-        case 921600: return B921600;
-        default:     return B115200;
-    }
-}
 
 int setup_native_uart(const std::string& port_name, speed_t baud_rate) {
     int fd = open(port_name.c_str(), O_RDWR | O_NOCTTY | O_NDELAY);
@@ -76,10 +60,9 @@ public:
     HalDvlNode(const std::string & node_name)
     : rclcpp_lifecycle::LifecycleNode(node_name)
     {
-        this->declare_parameter<std::string>("port_name", "/dev/ttyUART_232_C");
+        this->declare_parameter<std::string>("port_name", "/dev/ttyUART_232_A");
         this->declare_parameter<int>("baud_rate", 115200);
-        // 【修正点 1】默认开启声学功能，否则启动时会自动发送关闭指令(n,n)导致 DVL 停止出数
-        this->declare_parameter<bool>("acoustic_enabled_on_start", true);
+        this->declare_parameter<bool>("acoustic_enabled_on_start", false);
         this->declare_parameter<int>("acoustic_udp_port", app::udp::JETSON_PORT);
         cached_msg_.connection_status = 0;
     }
@@ -89,11 +72,11 @@ public:
         publish_timer_ = this->create_wall_timer(
             20ms, std::bind(&HalDvlNode::publish_timer_callback, this));
             
+        // 【新增 1】注册 ROS 2 工作模式服务
         mode_service_ = this->create_service<std_srvs::srv::SetBool>(
             "~/set_work_mode",
             std::bind(&HalDvlNode::set_work_mode_callback, this, std::placeholders::_1, std::placeholders::_2)
         );
-        RCLCPP_INFO(this->get_logger(), "节点已 Configure，等待 Activate 指令以启动串口线程...");
         return CallbackReturn::SUCCESS;
     }
 
@@ -103,7 +86,6 @@ public:
         dvl_thread_ = std::thread(&HalDvlNode::dvl_thread_function, this);
         udp_running_ = true;
         udp_thread_ = std::thread(&HalDvlNode::udp_control_thread_function, this);
-        RCLCPP_INFO(this->get_logger(), "节点已 Activate，串口读取线程与 UDP 线程已启动！");
         return LifecycleNode::on_activate(state);
     }
 
@@ -123,7 +105,7 @@ public:
     CallbackReturn on_cleanup(const rclcpp_lifecycle::State &) override {
         dvl_pub_.reset();
         publish_timer_.reset();
-        mode_service_.reset();
+        mode_service_.reset(); // 清理服务
         return CallbackReturn::SUCCESS;
     }
 
@@ -156,6 +138,7 @@ private:
     std::atomic<int64_t> last_valid_data_ns_{0};
     std::atomic<bool> acoustic_enabled_{false};
 
+    // 【新增 2】指令同步状态机与条件变量
     enum class CmdStatus { IDLE, WAITING, SUCCESS, FAILED };
     CmdStatus cmd_status_ = CmdStatus::IDLE;
     std::mutex cmd_mutex_;
@@ -206,6 +189,7 @@ private:
         data[1] = static_cast<uint8_t>((value >> 8U) & 0xFFU);
     }
 
+    // 【新增 3】处理来自上层的指令请求
     void set_work_mode_callback(const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
                                 std::shared_ptr<std_srvs::srv::SetBool::Response> response) {
         if (serial_fd_ < 0) {
@@ -249,6 +233,7 @@ private:
             return false;
         }
 
+        // true = y(声学工作)，false = n(声学关闭休眠)，需确保以 \n 结尾
         std::string cmd = enable ? "wcs,1500,,y,n\n" : "wcs,1500,,n,n\n";
 
         std::unique_lock<std::mutex> lock(cmd_mutex_);
@@ -265,6 +250,7 @@ private:
             return false;
         }
 
+        // 阻塞当前服务回调等待底层的回执唤醒，最大等待 2.0 秒防止死锁
         bool signaled = cmd_cv_.wait_for(lock, 2s, [this]{ return cmd_status_ != CmdStatus::WAITING; });
 
         if (!signaled) {
@@ -451,8 +437,8 @@ private:
             mark_dvl_unavailable();
         }
         RCLCPP_INFO(this->get_logger(),
-            "DVL 启动默认声学状态: %s (已下发配置: %s)",
-            enable_on_start ? "开启" : "关闭", cmd.c_str());
+            "DVL 启动默认声学状态: %s (已下发 wcs 配置)",
+            enable_on_start ? "开启" : "关闭");
     }
 
     void mark_dvl_unavailable() {
@@ -567,17 +553,14 @@ private:
                 if (serial_fd_ < 0) {
                     std::string port = this->get_parameter("port_name").as_string();
                     int baud_int = this->get_parameter("baud_rate").as_int();
-                    speed_t baud_rate = get_baud_rate_constant(baud_int); 
+                    speed_t baud_rate = (baud_int == 115200) ? B115200 : 
+                                        (baud_int == 460800) ? B460800 : B9600; 
 
-                    RCLCPP_INFO(this->get_logger(), "尝试打开串口设备: %s , 波特率: %d", port.c_str(), baud_int);
                     serial_fd_ = setup_native_uart(port, baud_rate);
                     if (serial_fd_ < 0) {
-                        RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 3000, 
-                            "打开串口 %s 失败! 错误码: %s", port.c_str(), strerror(errno));
                         std::this_thread::sleep_for(1s);
                         continue;
                     }
-                    RCLCPP_INFO(this->get_logger(), "串口 %s 打开成功 (fd=%d)", port.c_str(), serial_fd_);
                     send_startup_acoustic_mode();
                 }
 
@@ -587,52 +570,26 @@ private:
 
                 struct timeval tv;
                 tv.tv_sec = 0;
-                tv.tv_usec = 50000; // 提升轮询间隔到 50ms 减少 cpu 空转
+                tv.tv_usec = 5000; 
 
                 int ret = select(serial_fd_ + 1, &read_fds, NULL, NULL, &tv);
 
                 if (ret < 0) {
-                    throw std::runtime_error(std::string("select 监听底层错误: ") + strerror(errno));
+                    throw std::runtime_error("select 监听底层错误");
                 } 
                 else if (ret > 0 && FD_ISSET(serial_fd_, &read_fds)) {
                     int bytes_read = read(serial_fd_, read_buf, sizeof(read_buf));
                     
                     if (bytes_read < 0) {
                         if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                            throw std::runtime_error(std::string("原生 read 失败: ") + strerror(errno));
+                            throw std::runtime_error("原生 read 失败");
                         }
                     } 
                     else if (bytes_read == 0) {
-                         throw std::runtime_error("检测到串口断开/EOF");
+                         throw std::runtime_error("检测到虚拟串口 EOF (对端未连接或已断开)");
                     }
                     else {
                         int64_t capture_time_ns = this->now().nanoseconds();
-
-                        // =========================================================================
-                        // 【核心调试输出】：直接输出底层捕捉到的 RAW 数据 (HEX 与 替换非打印字符后的 ASCII)
-                        // =========================================================================
-                        std::stringstream hex_ss;
-                        std::string printable_ascii = "";
-                        for (int i = 0; i < bytes_read; ++i) {
-                            unsigned char byte = static_cast<unsigned char>(read_buf[i]);
-                            hex_ss << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << (int)byte << " ";
-                            
-                            if (byte >= 32 && byte <= 126) {
-                                printable_ascii += static_cast<char>(byte);
-                            } else if (byte == '\r') {
-                                printable_ascii += "\\r";
-                            } else if (byte == '\n') {
-                                printable_ascii += "\\n";
-                            } else {
-                                printable_ascii += ".";
-                            }
-                        }
-
-                        RCLCPP_INFO(this->get_logger(), 
-                            "[串口 RAW 读入 %d 字节] HEX: [%s] | ASCII: [%s]", 
-                            bytes_read, hex_ss.str().c_str(), printable_ascii.c_str());
-                        // =========================================================================
-
                         buffer.append(read_buf, bytes_read);
                         size_t pos = 0;
                         size_t processed_pos = 0;
@@ -644,28 +601,27 @@ private:
                             if (!line.empty() && line.back() == '\r') {
                                 line.pop_back();
                             }
-                            
-                            RCLCPP_INFO(this->get_logger(), ">>> [提取行数据]: '%s'", line.c_str());
-
-                            // 拦截 DVL 的响应包
+                            RCLCPP_INFO(this->get_logger(), "=== [串口原始数据捕捉] ===: '%s'", line.c_str());
+                            // 【新增 4】拦截 DVL 的响应包并唤醒等待的服务线程
+                            // 假设协议中 wra 代表 ACK(成功)，wrn 代表 NACK(失败/无效请求)
                             if (line.find("wra") != std::string::npos) {
                                 std::lock_guard<std::mutex> lock(cmd_mutex_);
                                 if (cmd_status_ == CmdStatus::WAITING) {
                                     cmd_status_ = CmdStatus::SUCCESS;
-                                    cmd_cv_.notify_all();
+                                    cmd_cv_.notify_all(); // 通知服务回调：成功！
                                 }
-                                continue;
+                                continue; // 这是控制协议，不再向下走速度解析
                             } 
                             else if (line.find("wrn") != std::string::npos) {
                                 std::lock_guard<std::mutex> lock(cmd_mutex_);
                                 if (cmd_status_ == CmdStatus::WAITING) {
                                     cmd_status_ = CmdStatus::FAILED;
-                                    cmd_cv_.notify_all();
+                                    cmd_cv_.notify_all(); // 通知服务回调：失败！
                                 }
                                 continue; 
                             }
                             
-                            // 常规速度报文交付解析
+                            // 常规的速度报文向下交付解析
                             if (line.find("wrx") != std::string::npos || line.find("wrz") != std::string::npos) {
                                 parse_and_cache(line, capture_time_ns); 
                             }

@@ -69,8 +69,8 @@ def main():
 
     parser.add_argument(
         "--port",
-        default="/dev/ttyUART_232_C",
-        help="串口设备，默认 /dev/ttyUART_232_C",
+        default="/dev/ttyUART_232_A",
+        help="串口设备，默认 /dev/ttyUART_232_A",
     )
 
     parser.add_argument(
