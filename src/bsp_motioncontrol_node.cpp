@@ -3,7 +3,8 @@
  * @brief BSP层运动控制节点 —— 6-DOF 动力学前馈 + PID 反馈控制
  *
  * ## 输入 (Subscriptions)
- *   - /hal/modecontrol    (HalModeControl):     模式控制指令
+ *   - /hal/modecontrol    (HalModeControl):     模式控制命令
+ *         1=开启PID, 2=关闭PID, 3=开启键盘遥控, 4=关闭键盘遥控
  *   - /hal/remotecontrol  (HalRemoteControl):   遥控通道量, 353~1695, 1024 为中位
  *         其中 pitch / roll 当前保留, 内部强制置零
  *   - /hal/inertialnavi    (HalInertialnavi):   航行器姿态 (yaw/pitch/roll)
@@ -44,6 +45,7 @@
  #include <array>
  #include <atomic>
  #include <chrono>
+ #include <cstdint>
  #include <cmath>
  #include <exception>
  #include <memory>
@@ -322,6 +324,15 @@
          this->declare_parameter<double>("cmd_timeout_s", 1.0);
          this->declare_parameter<std::string>("mode_topic", "/hal/modecontrol");
          this->declare_parameter<std::string>("remote_topic", "/hal/remotecontrol");
+         // HalModeControl 命令协议:
+         //   1 = 开启 PID 控制
+         //   2 = 关闭 PID 控制
+         //   3 = 开启键盘遥控
+         //   4 = 关闭键盘遥控
+         this->declare_parameter<int64_t>("mode_pid_enable_value", 1);
+         this->declare_parameter<int64_t>("mode_pid_disable_value", 2);
+         this->declare_parameter<int64_t>("mode_keyboard_enable_value", 3);
+         this->declare_parameter<int64_t>("mode_keyboard_disable_value", 4);
      }
  
      // ========================================================================
@@ -419,7 +430,7 @@
              active_ = false;
              clear_target_state();
              clear_vehicle_state();
-             send_zero_thrust();
+             reset_all_pid();
              thruster_cmd_pub_->on_deactivate();
              tail_cmd_pub_->on_deactivate();
              wing_cmd_pub_->on_deactivate();
@@ -431,16 +442,20 @@
      // 生命周期: on_deactivate
      // ========================================================================
      CallbackReturn on_deactivate(const rclcpp_lifecycle::State & state) override {
-         RCLCPP_INFO(get_logger(), "[MC] on_deactivate —— 停机, 发送零推力");
- 
+         RCLCPP_INFO(get_logger(), "[MC] on_deactivate —— 停机");
+
+         const bool was_enabled = disable_pid_output();
          active_ = false;
-         clear_target_state();
          clear_vehicle_state();
-         send_zero_thrust();
+         if (was_enabled) {
+             send_zero_thrust();
+         } else {
+             reset_all_pid();
+         }
          thruster_cmd_pub_->on_deactivate();
          tail_cmd_pub_->on_deactivate();
          wing_cmd_pub_->on_deactivate();
- 
+
          LifecycleNode::on_deactivate(state);
          return CallbackReturn::SUCCESS;
      }
@@ -467,18 +482,22 @@
      // 生命周期: on_shutdown
      // ========================================================================
      CallbackReturn on_shutdown(const rclcpp_lifecycle::State &) override {
+         const bool was_enabled = disable_pid_output();
          active_ = false;
-         clear_target_state();
          clear_vehicle_state();
-         send_zero_thrust();
+         if (was_enabled) {
+             send_zero_thrust();
+         }
          return CallbackReturn::SUCCESS;
      }
- 
+
      CallbackReturn on_error(const rclcpp_lifecycle::State &) override {
+         const bool was_enabled = disable_pid_output();
          active_ = false;
-         clear_target_state();
          clear_vehicle_state();
-         send_zero_thrust();
+         if (was_enabled) {
+             send_zero_thrust();
+         }
          return CallbackReturn::SUCCESS;
      }
  
@@ -562,6 +581,37 @@
          en_servo_ = this->get_parameter("enable_servo").as_bool();
  
          cmd_timeout_s_ = this->get_parameter("cmd_timeout_s").as_double();
+
+         const int64_t mode_pid_enable =
+             this->get_parameter("mode_pid_enable_value").as_int();
+         const int64_t mode_pid_disable =
+             this->get_parameter("mode_pid_disable_value").as_int();
+         const int64_t mode_keyboard_enable =
+             this->get_parameter("mode_keyboard_enable_value").as_int();
+         const int64_t mode_keyboard_disable =
+             this->get_parameter("mode_keyboard_disable_value").as_int();
+
+         const std::array<int64_t, 4> mode_values = {
+             mode_pid_enable, mode_pid_disable,
+             mode_keyboard_enable, mode_keyboard_disable
+         };
+         const bool mode_range_valid = std::all_of(
+             mode_values.begin(), mode_values.end(),
+             [](int64_t value) { return value >= 0 && value <= 255; });
+         std::array<int64_t, 4> sorted_modes = mode_values;
+         std::sort(sorted_modes.begin(), sorted_modes.end());
+         const bool mode_unique =
+             std::adjacent_find(sorted_modes.begin(), sorted_modes.end()) == sorted_modes.end();
+         if (!mode_range_valid || !mode_unique) {
+             throw std::invalid_argument(
+                 "mode command values must be unique and in [0, 255]");
+         }
+
+         pid_enable_value_ = static_cast<uint8_t>(mode_pid_enable);
+         pid_disable_value_ = static_cast<uint8_t>(mode_pid_disable);
+         keyboard_enable_value_ = static_cast<uint8_t>(mode_keyboard_enable);
+         keyboard_disable_value_ = static_cast<uint8_t>(mode_keyboard_disable);
+
          const double control_rate_hz =
              this->get_parameter("control_rate_hz").as_double();
          if (!std::isfinite(cmd_timeout_s_) || cmd_timeout_s_ <= 0.0 ||
@@ -649,37 +699,81 @@
      void mode_cb(const hal::msg::HalModeControl::SharedPtr msg) {
          if (!active_) return;
 
-         if (msg->command == hal::msg::HalModeControl::CMD_ENABLE_PID) {
-             std::lock_guard<std::mutex> lock(cmd_mutex_);
-             pid_mode_enabled_ = true;
-             target_ = TargetSetpoint{};
-             last_cmd_time_ = std::chrono::steady_clock::now();
-             reset_all_pid();
-             RCLCPP_INFO(get_logger(), "[MC] PID mode enabled");
-             return;
-         }
-         if (msg->command == hal::msg::HalModeControl::CMD_DISABLE_PID) {
+         const uint8_t cmd = msg->modecontrol_cmd;
+
+         // 1: 开启 PID 控制。
+         if (cmd == pid_enable_value_) {
+             bool mode_changed = false;
              {
                  std::lock_guard<std::mutex> lock(cmd_mutex_);
-                 pid_mode_enabled_ = false;
-                 target_ = TargetSetpoint{};
+                 if (!pid_mode_enabled_) {
+                     pid_mode_enabled_ = true;
+                     target_ = TargetSetpoint{};
+                     last_cmd_time_ = std::chrono::steady_clock::now();
+                     mode_changed = true;
+                 }
              }
-             reset_all_pid();
-             send_zero_thrust();
-             RCLCPP_INFO(get_logger(), "[MC] PID mode disabled");
+             if (mode_changed) {
+                 reset_all_pid();
+                 yaw_target_initialized_ = false;
+                 RCLCPP_INFO(get_logger(),
+                     "[MC] PID mode enabled (cmd=%u)",
+                     static_cast<unsigned>(cmd));
+             }
+             return;
          }
+
+         // 2: 显式关闭 PID。
+         // 3: 开启键盘遥控，键盘优先接管，因此 PID 节点必须自动退出。
+         if (cmd == pid_disable_value_ || cmd == keyboard_enable_value_) {
+             const bool was_enabled = disable_pid_output();
+             if (was_enabled) {
+                 send_zero_thrust();  // 仅在退出瞬间发布一次零推力
+                 RCLCPP_INFO(get_logger(),
+                     "[MC] PID mode disabled (cmd=%u%s)",
+                     static_cast<unsigned>(cmd),
+                     cmd == keyboard_enable_value_ ? ", keyboard takeover" : "");
+             }
+             return;
+         }
+
+         // 4 = 关闭键盘，与 PID 模式状态无关，因此这里不动作。
+         if (cmd == keyboard_disable_value_) {
+             return;
+         }
+
+         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+             "[MC] unknown mode command: %u", static_cast<unsigned>(cmd));
+     }
+
+     bool disable_pid_output() {
+         bool was_enabled = false;
+         {
+             std::lock_guard<std::mutex> lock(cmd_mutex_);
+             was_enabled = pid_mode_enabled_;
+             pid_mode_enabled_ = false;
+             target_ = TargetSetpoint{};
+             last_cmd_time_ = std::chrono::steady_clock::now();
+         }
+         if (was_enabled) {
+             reset_all_pid();
+             yaw_target_initialized_ = false;
+             prev_yaw_target_ = 0.0;
+             filtered_yaw_rate_ = 0.0;
+         }
+         return was_enabled;
      }
 
      void remote_cb(const hal::msg::HalRemoteControl::SharedPtr msg) {
          if (!active_) return;
 
          const std::array<double, 6> channels = {
-             static_cast<double>(msg->surge),
-             static_cast<double>(msg->sway),
-             static_cast<double>(msg->heave),
-             static_cast<double>(msg->yaw),
-             static_cast<double>(msg->pitch),
-             static_cast<double>(msg->roll),
+             static_cast<double>(msg->tunnel1_para),
+             static_cast<double>(msg->tunnel2_para),
+             static_cast<double>(msg->tunnel3_para),
+             static_cast<double>(msg->tunnel4_para),
+             static_cast<double>(msg->tunnel5_para),
+             static_cast<double>(msg->tunnel6_para),
          };
          if (!std::all_of(channels.begin(), channels.end(),
                  [](double value) { return std::isfinite(value); })) {
@@ -722,8 +816,8 @@
              last_cmd = last_cmd_time_;
              pid_mode_enabled = pid_mode_enabled_;
          }
+         // PID 未开启时完全不发布，避免与键盘遥控节点争抢 /hal/thruster/cmd。
          if (!pid_mode_enabled) {
-             send_zero_thrust();
              return;
          }
          {
@@ -975,7 +1069,7 @@
      // 安全工具
      // ========================================================================
      void send_zero_thrust() {
-         if (!thruster_cmd_pub_) {
+         if (!thruster_cmd_pub_ || !thruster_cmd_pub_->is_activated()) {
              reset_all_pid();
              return;
          }
@@ -1070,6 +1164,10 @@
      bool en_servo_  = false;
      double cmd_timeout_s_ = 1.0;
      bool pid_mode_enabled_ = false;
+     uint8_t pid_enable_value_ = 1;
+     uint8_t pid_disable_value_ = 2;
+     uint8_t keyboard_enable_value_ = 3;
+     uint8_t keyboard_disable_value_ = 4;
  
      // -- ROS2 接口 --
      rclcpp::Subscription<hal::msg::HalInertialnavi>::SharedPtr  imu_sub_;

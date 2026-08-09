@@ -18,7 +18,9 @@
 
 #include "hal/msg/hal_antenna_control.hpp"
 #include "hal/msg/hal_light_control.hpp"
-
+#include "hal/msg/hal_mode_control.hpp"
+#include "hal/msg/hal_remote_control.hpp"
+#include "hal/msg/hal_dvl_control.hpp"
 
 #include "hal/srv/hal_battery_control_srv.hpp"
 
@@ -66,7 +68,10 @@ public:
         // depth_image_sub_  = this->create_subscription<sensor_msgs::msg::Image>("/uvms/perception/depth",rclcpp::SensorDataQoS(),std::bind(&BspCommNode::depth_image_callback, this, std::placeholders::_1));
         
         antenna_control_pub_    = this->create_publisher<hal::msg::HalAntennaControl>("/hal/antennacontrol", 10);
-        light_control_pub_ = this->create_publisher<hal::msg::HalLightControl>("/hal/lightcontrol", 10);
+        light_control_pub_      = this->create_publisher<hal::msg::HalLightControl>("/hal/lightcontrol", 10);
+        mode_control_pub_       = this->create_publisher<hal::msg::HalModeControl>("/hal/modecontrol", 10);
+        remote_control_pub_     = this->create_publisher<hal::msg::HalRemoteControl>("/hal/remotecontrol", 10);
+        dvl_control_pub_        = this->create_publisher<hal::msg::HalDVLControl>("/hal/dvlcontrol", 10);
         
         battery_control_client_ = this->create_client<hal::srv::HalBatteryControlSrv>("/hal/batterycontrol");
  
@@ -124,13 +129,11 @@ public:
     active_ = true;
     udp_recv_running_ = true;
 
-    if (light_control_pub_) {
-        light_control_pub_->on_activate();
-    }
-
-    if (antenna_control_pub_) {
-        antenna_control_pub_->on_activate();
-    }
+        if (light_control_pub_) {light_control_pub_->on_activate();}
+        if (antenna_control_pub_) {antenna_control_pub_->on_activate();}
+        if (mode_control_pub_) {mode_control_pub_->on_activate();}
+        if (remote_control_pub_) {remote_control_pub_->on_activate();}
+        if (dvl_control_pub_) {dvl_control_pub_->on_activate();}
 
 
     udp_recv_thread_ = std::thread(&BspCommNode::udp_receive_function, this);
@@ -745,6 +748,9 @@ private:
     
     rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalAntennaControl>::SharedPtr antenna_control_pub_;
     rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalLightControl>::SharedPtr light_control_pub_;
+    rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalModeControl>::SharedPtr mode_control_pub_;
+    rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalRemoteControl>::SharedPtr remote_control_pub_;
+    rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalDVLControl>::SharedPtr dvl_control_pub_;
     rclcpp::Client<hal::srv::HalBatteryControlSrv>::SharedPtr battery_control_client_;
 
     std::optional<hal::msg::HalInertialnavi> inertial_data_;
@@ -801,6 +807,18 @@ private:
             case 0x35:
             {battery_control(payload); break;}
 
+            // 模式控制
+            case 0x41:
+            {mode_control(payload); break;}
+            
+            // 遥控控制
+            case 0x42:
+            {remote_control(payload); break;}
+
+            // DVL控制
+            case 0x44:
+            {dvl_control(payload); break;}
+
             default:
             {RCLCPP_WARN(this->get_logger(), "Unknown command id: 0x%02X", msg_id); break;}
         }
@@ -848,6 +866,67 @@ private:
         antenna_control_pub_->publish(msg);
 
         RCLCPP_INFO(this->get_logger(), "Published /hal/antenna_control");
+    }
+
+     // 模式控制 
+    void mode_control(const std::vector<uint8_t>& payload)
+    {
+        if(payload.size() != 1) {RCLCPP_WARN(this->get_logger(), "Mode command payload length error: %ld", payload.size()); return;}
+
+        uint8_t mode_cmd = payload[0];
+
+        auto msg = hal::msg::HalModeControl();
+        msg.modecontrol_cmd = mode_cmd;
+        mode_control_pub_->publish(msg);
+
+        RCLCPP_INFO(this->get_logger(),"Publish mode control command: %d", mode_cmd);
+    }
+    
+    // 遥控控制 
+    void remote_control(const std::vector<uint8_t>& payload)
+    {
+        if(payload.size() != 24) {RCLCPP_WARN(this->get_logger(), "Remote control payload length error: %ld", payload.size()); return;}
+
+        float tunnel1;
+        float tunnel2;
+        float tunnel3;
+        float tunnel4;
+        float tunnel5;
+        float tunnel6;
+
+        memcpy(&tunnel1, payload.data(), sizeof(float));
+        memcpy(&tunnel2, payload.data()+4, sizeof(float));
+        memcpy(&tunnel3, payload.data()+8, sizeof(float));
+        memcpy(&tunnel4, payload.data()+12, sizeof(float));
+        memcpy(&tunnel5, payload.data()+16, sizeof(float));
+        memcpy(&tunnel6, payload.data()+20, sizeof(float));
+
+        auto msg = hal::msg::HalRemoteControl();
+
+        msg.tunnel1_para = tunnel1;
+        msg.tunnel2_para = tunnel2;
+        msg.tunnel3_para = tunnel3;
+        msg.tunnel4_para = tunnel4;
+        msg.tunnel5_para = tunnel5;
+        msg.tunnel6_para = tunnel6;
+
+        remote_control_pub_->publish(msg);
+
+        RCLCPP_INFO(this->get_logger(), "Remote control: %.3f %.3f %.3f %.3f %.3f %.3f", tunnel1, tunnel2, tunnel3, tunnel4, tunnel5, tunnel6);
+    }
+    
+    // DVL控制 
+    void dvl_control(const std::vector<uint8_t>& payload)
+    {
+        if(payload.size() != 1) {RCLCPP_WARN(this->get_logger(), "DVL command payload length error: %ld", payload.size()); return;}
+
+        uint8_t dvl_cmd = payload[0];
+
+        auto msg = hal::msg::HalDVLControl();
+        msg.dvlcontrol_cmd = dvl_cmd;
+        dvl_control_pub_->publish(msg);
+
+        RCLCPP_INFO(this->get_logger(),"Publish DVL control command: %d", dvl_cmd);
     }
     
     void battery_control(const std::vector<uint8_t>& payload)

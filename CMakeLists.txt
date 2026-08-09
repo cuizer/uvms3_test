@@ -63,7 +63,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/HalLightControl.msg"
   "msg/HalModeControl.msg"
   "msg/HalRemoteControl.msg"
-  "msg/HalDvlControl.msg"
+  "msg/HalDVLControl.msg"
   DEPENDENCIES std_msgs builtin_interfaces
 )
 

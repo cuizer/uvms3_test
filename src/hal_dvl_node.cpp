@@ -10,6 +10,7 @@
 #include <sstream> 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <cerrno>
 #include <exception>
 #include <functional>
@@ -69,7 +70,7 @@ public:
         dvl_pub_ = this->create_publisher<hal::msg::HalDvl>("/hal/dvl", 10);
         publish_timer_ = this->create_wall_timer(
             20ms, std::bind(&HalDvlNode::publish_timer_callback, this));
-        dvl_control_sub_ = this->create_subscription<hal::msg::HalDvlControl>(
+        dvl_control_sub_ = this->create_subscription<hal::msg::HalDVLControl>(
             "/hal/dvlcontrol",
             rclcpp::QoS(10).reliable(),
             std::bind(&HalDvlNode::dvl_control_callback, this, std::placeholders::_1));
@@ -116,7 +117,7 @@ public:
 private:
     std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalDvl>> dvl_pub_;
     rclcpp::TimerBase::SharedPtr publish_timer_;
-    rclcpp::Subscription<hal::msg::HalDvlControl>::SharedPtr dvl_control_sub_;
+    rclcpp::Subscription<hal::msg::HalDVLControl>::SharedPtr dvl_control_sub_;
 
     hal::msg::HalDvl cached_msg_;
     std::mutex msg_mutex_;
@@ -132,8 +133,17 @@ private:
     std::mutex cmd_mutex_;
     std::condition_variable cmd_cv_;
 
+    // HalDVLControl.msg 仅包含: uint8 dvlcontrol_cmd
+    // 控制协议值在节点内部定义，不依赖 msg 中不存在的 CMD_* 常量。
+    // 与现有 DVL 声学状态编码保持一致:
+    //   0 -> 开启声学
+    //   1 -> 关闭声学
+    //   2 -> 查询当前声学状态
     static constexpr uint8_t ACOUSTIC_ENABLED = 0;
     static constexpr uint8_t ACOUSTIC_DISABLED = 1;
+    static constexpr uint8_t DVL_CMD_ENABLE = 0;
+    static constexpr uint8_t DVL_CMD_DISABLE = 1;
+    static constexpr uint8_t DVL_CMD_QUERY = 2;
 
     enum class ControlResult : uint8_t {
         Ok = 0x00,
@@ -170,22 +180,27 @@ private:
         return acoustic_enabled_.load() ? ACOUSTIC_ENABLED : ACOUSTIC_DISABLED;
     }
 
-    void dvl_control_callback(const hal::msg::HalDvlControl::SharedPtr msg) {
-        if (msg->command == hal::msg::HalDvlControl::CMD_QUERY) {
+    void dvl_control_callback(const hal::msg::HalDVLControl::SharedPtr msg) {
+        const uint8_t cmd = msg->dvlcontrol_cmd;
+
+        if (cmd == DVL_CMD_QUERY) {
             RCLCPP_INFO(this->get_logger(), "DVL 声学状态查询: %s",
                 acoustic_enabled_.load() ? "开启" : "关闭");
             return;
         }
 
-        if (msg->command != hal::msg::HalDvlControl::CMD_DISABLE &&
-            msg->command != hal::msg::HalDvlControl::CMD_ENABLE) {
-            RCLCPP_WARN(this->get_logger(), "DVL 控制指令非法: %u",
-                static_cast<unsigned int>(msg->command));
+        if (cmd != DVL_CMD_DISABLE && cmd != DVL_CMD_ENABLE) {
+            RCLCPP_WARN(this->get_logger(),
+                "DVL 控制指令非法: %u (有效值: enable=%u, disable=%u, query=%u)",
+                static_cast<unsigned int>(cmd),
+                static_cast<unsigned int>(DVL_CMD_ENABLE),
+                static_cast<unsigned int>(DVL_CMD_DISABLE),
+                static_cast<unsigned int>(DVL_CMD_QUERY));
             return;
         }
 
         ControlResult result = ControlResult::Ok;
-        const bool enable = (msg->command == hal::msg::HalDvlControl::CMD_ENABLE);
+        const bool enable = (cmd == DVL_CMD_ENABLE);
         const bool ok = set_acoustic_mode_wait(enable, result);
         RCLCPP_INFO(this->get_logger(), "DVL 声学%s结果: %s",
             enable ? "开启" : "关闭",

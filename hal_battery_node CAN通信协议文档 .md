@@ -488,6 +488,7 @@ ros2 lifecycle get /hal_battery_node
 ```bash
 source install/setup.bash
 ros2 service call /hal/batterycontrol hal/srv/HalBatteryControlSrv "{command: 1}"
+
 ```
 
 服务返回成功仅表示节点已接受并保存该期望状态。节点不会在服务回调中立即发送 CAN 帧，而是在下一个 100 ms 定时周期开始，以 10 Hz 持续发送 CAN ID `0x100`：

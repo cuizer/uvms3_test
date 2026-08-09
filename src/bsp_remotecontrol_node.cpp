@@ -2,11 +2,13 @@
  * @file bsp_remotecontrol_node.cpp
  * @brief BSP 层开环遥控节点。订阅统一通信节点发布的模式和遥控通道 topic,
  *        做开环推力分配并发布 /hal/thruster/cmd。
+ *        模式命令: 1=开启PID, 2=关闭PID, 3=开启键盘, 4=关闭键盘。
  */
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <cmath>
 #include <exception>
 #include <functional>
@@ -61,6 +63,15 @@ public:
     {
         this->declare_parameter<std::string>("mode_topic", "/hal/modecontrol");
         this->declare_parameter<std::string>("remote_topic", "/hal/remotecontrol");
+        // HalModeControl 命令协议:
+        //   1 = 开启 PID 控制
+        //   2 = 关闭 PID 控制
+        //   3 = 开启键盘遥控
+        //   4 = 关闭键盘遥控
+        this->declare_parameter<int64_t>("mode_pid_enable_value", 1);
+        this->declare_parameter<int64_t>("mode_pid_disable_value", 2);
+        this->declare_parameter<int64_t>("mode_keyboard_enable_value", 3);
+        this->declare_parameter<int64_t>("mode_keyboard_disable_value", 4);
         this->declare_parameter("control_rate_hz", 20.0);
         this->declare_parameter("cmd_timeout_s", 0.5);
         this->declare_parameter("surge_scale", 300.0);
@@ -97,6 +108,37 @@ public:
 
         const double rate = this->get_parameter("control_rate_hz").as_double();
         cmd_timeout_s_ = this->get_parameter("cmd_timeout_s").as_double();
+        const int64_t mode_pid_enable =
+            this->get_parameter("mode_pid_enable_value").as_int();
+        const int64_t mode_pid_disable =
+            this->get_parameter("mode_pid_disable_value").as_int();
+        const int64_t mode_keyboard_enable =
+            this->get_parameter("mode_keyboard_enable_value").as_int();
+        const int64_t mode_keyboard_disable =
+            this->get_parameter("mode_keyboard_disable_value").as_int();
+
+        const std::array<int64_t, 4> mode_values = {
+            mode_pid_enable, mode_pid_disable,
+            mode_keyboard_enable, mode_keyboard_disable
+        };
+        const bool mode_range_valid = std::all_of(
+            mode_values.begin(), mode_values.end(),
+            [](int64_t value) { return value >= 0 && value <= 255; });
+        std::array<int64_t, 4> sorted_modes = mode_values;
+        std::sort(sorted_modes.begin(), sorted_modes.end());
+        const bool mode_unique =
+            std::adjacent_find(sorted_modes.begin(), sorted_modes.end()) == sorted_modes.end();
+        if (!mode_range_valid || !mode_unique) {
+            RCLCPP_ERROR(get_logger(),
+                "[BSP_RC] mode command values must be unique and in [0, 255]");
+            thruster_pub_->on_deactivate();
+            return CallbackReturn::FAILURE;
+        }
+
+        pid_enable_value_ = static_cast<uint8_t>(mode_pid_enable);
+        pid_disable_value_ = static_cast<uint8_t>(mode_pid_disable);
+        keyboard_enable_value_ = static_cast<uint8_t>(mode_keyboard_enable);
+        keyboard_disable_value_ = static_cast<uint8_t>(mode_keyboard_disable);
         surge_scale_ = this->get_parameter("surge_scale").as_double();
         sway_scale_ = this->get_parameter("sway_scale").as_double();
         heave_scale_ = this->get_parameter("heave_scale").as_double();
@@ -146,12 +188,10 @@ public:
     CallbackReturn on_deactivate(const rclcpp_lifecycle::State &) override
     {
         if (ctrl_timer_) ctrl_timer_->cancel();
-        {
-            std::lock_guard<std::mutex> lock(cmd_mutex_);
-            remote_enabled_ = false;
-            latest_cmd_ = RemoteCmd{};
+        const bool was_enabled = disable_keyboard_output();
+        if (was_enabled) {
+            send_zero_thrust();
         }
-        send_zero_thrust();
         thruster_pub_->on_deactivate();
         return CallbackReturn::SUCCESS;
     }
@@ -168,7 +208,10 @@ public:
     CallbackReturn on_shutdown(const rclcpp_lifecycle::State &) override
     {
         if (ctrl_timer_) ctrl_timer_->cancel();
-        send_zero_thrust();
+        const bool was_enabled = disable_keyboard_output();
+        if (was_enabled) {
+            send_zero_thrust();
+        }
         return CallbackReturn::SUCCESS;
     }
 
@@ -177,25 +220,68 @@ private:
     {
         if (!thruster_pub_ || !thruster_pub_->is_activated()) return;
 
-        if (msg->command == hal::msg::HalModeControl::CMD_ENABLE_KEYBOARD) {
-            std::lock_guard<std::mutex> lock(cmd_mutex_);
-            remote_enabled_ = true;
-            latest_cmd_ = RemoteCmd{};
-            last_cmd_time_ = std::chrono::steady_clock::now();
-            reset_smoothing();
-            RCLCPP_INFO(get_logger(), "[BSP_RC] keyboard remote enabled");
-            return;
-        }
-        if (msg->command == hal::msg::HalModeControl::CMD_DISABLE_KEYBOARD) {
+        const uint8_t cmd = msg->modecontrol_cmd;
+
+        // 3: 开启键盘遥控。
+        if (cmd == keyboard_enable_value_) {
+            bool mode_changed = false;
             {
                 std::lock_guard<std::mutex> lock(cmd_mutex_);
-                remote_enabled_ = false;
-                latest_cmd_ = RemoteCmd{};
+                if (!remote_enabled_) {
+                    remote_enabled_ = true;
+                    latest_cmd_ = RemoteCmd{};
+                    last_cmd_time_ = std::chrono::steady_clock::now();
+                    mode_changed = true;
+                }
             }
-            reset_smoothing();
-            send_zero_thrust();
-            RCLCPP_INFO(get_logger(), "[BSP_RC] keyboard remote disabled");
+            if (mode_changed) {
+                reset_smoothing();
+                watchdog_tripped_ = false;
+                RCLCPP_INFO(get_logger(),
+                    "[BSP_RC] keyboard remote enabled (cmd=%u)",
+                    static_cast<unsigned>(cmd));
+            }
+            return;
         }
+
+        // 4: 显式关闭键盘遥控。
+        // 1: 开启 PID，PID 优先接管，因此键盘节点必须自动退出。
+        if (cmd == keyboard_disable_value_ || cmd == pid_enable_value_) {
+            const bool was_enabled = disable_keyboard_output();
+            if (was_enabled) {
+                send_zero_thrust();  // 仅在退出瞬间发布一次零推力
+                RCLCPP_INFO(get_logger(),
+                    "[BSP_RC] keyboard remote disabled (cmd=%u%s)",
+                    static_cast<unsigned>(cmd),
+                    cmd == pid_enable_value_ ? ", PID takeover" : "");
+            }
+            return;
+        }
+
+        // 2 = 关闭 PID，与键盘模式状态无关，因此这里不动作。
+        if (cmd == pid_disable_value_) {
+            return;
+        }
+
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+            "[BSP_RC] unknown mode command: %u", static_cast<unsigned>(cmd));
+    }
+
+    bool disable_keyboard_output()
+    {
+        bool was_enabled = false;
+        {
+            std::lock_guard<std::mutex> lock(cmd_mutex_);
+            was_enabled = remote_enabled_;
+            remote_enabled_ = false;
+            latest_cmd_ = RemoteCmd{};
+            last_cmd_time_ = std::chrono::steady_clock::now();
+        }
+        if (was_enabled) {
+            reset_smoothing();
+            watchdog_tripped_ = false;
+        }
+        return was_enabled;
     }
 
     void remote_callback(const hal::msg::HalRemoteControl::SharedPtr msg)
@@ -203,12 +289,12 @@ private:
         if (!thruster_pub_ || !thruster_pub_->is_activated()) return;
 
         const std::array<double, 6> channels = {
-            static_cast<double>(msg->surge),
-            static_cast<double>(msg->sway),
-            static_cast<double>(msg->heave),
-            static_cast<double>(msg->yaw),
-            static_cast<double>(msg->pitch),
-            static_cast<double>(msg->roll),
+            static_cast<double>(msg->tunnel1_para),
+            static_cast<double>(msg->tunnel2_para),
+            static_cast<double>(msg->tunnel3_para),
+            static_cast<double>(msg->tunnel4_para),
+            static_cast<double>(msg->tunnel5_para),
+            static_cast<double>(msg->tunnel6_para),
         };
         if (!std::all_of(channels.begin(), channels.end(),
                 [](double value) { return std::isfinite(value); })) {
@@ -242,8 +328,14 @@ private:
 
         const double age = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - last_cmd_time).count();
-        if (!enabled || !cmd.fresh || age > cmd_timeout_s_) {
-            if (enabled && cmd.fresh && !watchdog_tripped_) {
+        // 未开启键盘模式时完全不发布，避免与 PID 节点争抢 /hal/thruster/cmd。
+        if (!enabled) {
+            return;
+        }
+
+        // 键盘模式已开启，但没有新指令或指令超时：安全输出零推力。
+        if (!cmd.fresh || age > cmd_timeout_s_) {
+            if (cmd.fresh && !watchdog_tripped_) {
                 RCLCPP_WARN(get_logger(),
                     "[BSP_RC] command watchdog triggered (age=%.3fs)", age);
                 watchdog_tripped_ = true;
@@ -333,6 +425,10 @@ private:
     std::chrono::steady_clock::time_point last_cmd_time_{};
     bool remote_enabled_ = false;
     bool watchdog_tripped_ = false;
+    uint8_t pid_enable_value_ = 1;
+    uint8_t pid_disable_value_ = 2;
+    uint8_t keyboard_enable_value_ = 3;
+    uint8_t keyboard_disable_value_ = 4;
 
     double cmd_timeout_s_ = 0.5;
     double surge_scale_ = 300.0;

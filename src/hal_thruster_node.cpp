@@ -122,7 +122,7 @@ private:
     const int64_t ONLINE_TIMEOUT_MS = 4000; // 2秒未收到反馈判定为离线
     
     // 【架构修补】：实际硬件存在的 5 个辅推 ID (避开主推的 1 号 ID)
-    const std::array<uint8_t, 5> ACTIVE_AUX_IDS = {0, 2, 3, 4, 5};
+    const std::array<uint8_t, 5> ACTIVE_AUX_IDS = {1, 2, 3, 4, 5};
 
     // --- 状态控制变量 ---
     std::atomic<bool> is_estopped_{false}; 
