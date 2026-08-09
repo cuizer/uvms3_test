@@ -9,7 +9,7 @@ import sys
 # 1. 协议常量与目标配置
 # ==========================================
 TARGET_IP = "127.0.0.1"
-TARGET_PORT = 5004       # 目标控制平面监听端口
+TARGET_PORT = 8114       # Jetson 统一 UDP 入口
 
 MAGIC_UVMC = b'UVMC'     # 协议魔术字
 PROTO_VERSION = 1        # 协议版本

@@ -1,6 +1,6 @@
-"""Compatibility alias for the remotely managed motion-control bringup.
+"""Compatibility alias for the BSP remote motion-control bringup.
 
-New deployments should launch ``remote_motion_control.launch.py`` directly.
+New deployments should launch ``bsp_remote_motion_control.launch.py`` directly.
 This filename remains valid for existing scripts and includes the same bringup;
 it must not be launched alongside the canonical entry point.
 """
@@ -13,16 +13,16 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 
 def generate_launch_description():
-    canonical_launch = Path(__file__).with_name("remote_motion_control.launch.py")
+    canonical_launch = Path(__file__).with_name("bsp_remote_motion_control.launch.py")
     if not canonical_launch.is_file():
         raise RuntimeError(
-            "remote_motion_control.launch.py is missing from the installed hal package"
+            "bsp_remote_motion_control.launch.py is missing from the installed hal package"
         )
 
     return LaunchDescription([
         LogInfo(msg=(
             "motion_control.launch.py is a compatibility alias; "
-            "including remote_motion_control.launch.py"
+            "including bsp_remote_motion_control.launch.py"
         )),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(canonical_launch))

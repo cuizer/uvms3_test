@@ -1,7 +1,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include "hal/msg/hal_dvl.hpp" 
-#include <std_srvs/srv/set_bool.hpp> // 【新增】用于工作模式切换的标准服务
+#include "hal/msg/hal_dvl_control.hpp"
 #include <thread>
 #include <mutex>
 #include <chrono>
@@ -9,19 +9,17 @@
 #include <string>
 #include <sstream> 
 #include <atomic>
-#include <condition_variable> // 【新增】用于服务线程与接收线程同步
+#include <condition_variable>
+#include <cerrno>
+#include <exception>
+#include <functional>
+#include <stdexcept>
 
-// 引入 Linux 底层串口所需的系统头文件
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
 #include <cstring>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 #include <sys/select.h> 
-
-#include "app/udp_ports.hpp"
 
 int setup_native_uart(const std::string& port_name, speed_t baud_rate) {
     int fd = open(port_name.c_str(), O_RDWR | O_NOCTTY | O_NDELAY);
@@ -63,7 +61,7 @@ public:
         this->declare_parameter<std::string>("port_name", "/dev/ttyUART_232_A");
         this->declare_parameter<int>("baud_rate", 115200);
         this->declare_parameter<bool>("acoustic_enabled_on_start", false);
-        this->declare_parameter<int>("acoustic_udp_port", app::udp::JETSON_PORT);
+        cached_msg_.modecontrol_cmd = ACOUSTIC_DISABLED;
         cached_msg_.connection_status = 0;
     }
 
@@ -71,12 +69,10 @@ public:
         dvl_pub_ = this->create_publisher<hal::msg::HalDvl>("/hal/dvl", 10);
         publish_timer_ = this->create_wall_timer(
             20ms, std::bind(&HalDvlNode::publish_timer_callback, this));
-            
-        // 【新增 1】注册 ROS 2 工作模式服务
-        mode_service_ = this->create_service<std_srvs::srv::SetBool>(
-            "~/set_work_mode",
-            std::bind(&HalDvlNode::set_work_mode_callback, this, std::placeholders::_1, std::placeholders::_2)
-        );
+        dvl_control_sub_ = this->create_subscription<hal::msg::HalDvlControl>(
+            "/hal/dvlcontrol",
+            rclcpp::QoS(10).reliable(),
+            std::bind(&HalDvlNode::dvl_control_callback, this, std::placeholders::_1));
         return CallbackReturn::SUCCESS;
     }
 
@@ -84,15 +80,12 @@ public:
         dvl_pub_->on_activate();
         is_running_ = true;
         dvl_thread_ = std::thread(&HalDvlNode::dvl_thread_function, this);
-        udp_running_ = true;
-        udp_thread_ = std::thread(&HalDvlNode::udp_control_thread_function, this);
         return LifecycleNode::on_activate(state);
     }
 
     CallbackReturn on_deactivate(const rclcpp_lifecycle::State & state) override {
         dvl_pub_->on_deactivate();
         is_running_ = false;
-        stop_udp_control();
         if (dvl_thread_.joinable()) dvl_thread_.join();
         
         if (serial_fd_ >= 0) {
@@ -105,13 +98,12 @@ public:
     CallbackReturn on_cleanup(const rclcpp_lifecycle::State &) override {
         dvl_pub_.reset();
         publish_timer_.reset();
-        mode_service_.reset(); // 清理服务
+        dvl_control_sub_.reset();
         return CallbackReturn::SUCCESS;
     }
 
     CallbackReturn on_shutdown(const rclcpp_lifecycle::State &) override {
         is_running_ = false;
-        stop_udp_control();
         if (dvl_thread_.joinable()) dvl_thread_.join();
         
         if (serial_fd_ >= 0) {
@@ -124,40 +116,26 @@ public:
 private:
     std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<hal::msg::HalDvl>> dvl_pub_;
     rclcpp::TimerBase::SharedPtr publish_timer_;
-    rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr mode_service_;
+    rclcpp::Subscription<hal::msg::HalDvlControl>::SharedPtr dvl_control_sub_;
 
     hal::msg::HalDvl cached_msg_;
     std::mutex msg_mutex_;
 
     int serial_fd_ = -1;
-    int udp_fd_ = -1;
     std::thread dvl_thread_;
-    std::thread udp_thread_;
     std::atomic<bool> is_running_{false};
-    std::atomic<bool> udp_running_{false};
     std::atomic<int64_t> last_valid_data_ns_{0};
     std::atomic<bool> acoustic_enabled_{false};
 
-    // 【新增 2】指令同步状态机与条件变量
     enum class CmdStatus { IDLE, WAITING, SUCCESS, FAILED };
     CmdStatus cmd_status_ = CmdStatus::IDLE;
     std::mutex cmd_mutex_;
     std::condition_variable cmd_cv_;
 
-    static constexpr uint8_t UDP_REQ_HEADER_0 = 0x0D;
-    static constexpr uint8_t UDP_REQ_HEADER_1 = 0x0C;
-    static constexpr uint8_t UDP_RESP_HEADER_0 = 0x0D;
-    static constexpr uint8_t UDP_RESP_HEADER_1 = 0x8C;
-    static constexpr size_t UDP_REQ_SIZE = 7;
-    static constexpr size_t UDP_RESP_SIZE = 9;
+    static constexpr uint8_t ACOUSTIC_ENABLED = 0;
+    static constexpr uint8_t ACOUSTIC_DISABLED = 1;
 
-    enum class UdpCommand : uint8_t {
-        Disable = 0x00,
-        Enable = 0x01,
-        Query = 0x02,
-    };
-
-    enum class UdpResult : uint8_t {
+    enum class ControlResult : uint8_t {
         Ok = 0x00,
         Invalid = 0x01,
         SerialNotReady = 0x02,
@@ -167,78 +145,64 @@ private:
         Busy = 0x06,
     };
 
-    static uint16_t crc16_modbus(const uint8_t *data, size_t len) {
-        uint16_t crc = 0xFFFF;
-        for (size_t i = 0; i < len; ++i) {
-            crc ^= data[i];
-            for (int bit = 0; bit < 8; ++bit) {
-                crc = (crc & 0x0001U) ? static_cast<uint16_t>((crc >> 1U) ^ 0xA001U)
-                                      : static_cast<uint16_t>(crc >> 1U);
-            }
+    const char * control_result_to_string(ControlResult result) const {
+        switch (result) {
+            case ControlResult::Ok:
+                return "ok";
+            case ControlResult::Invalid:
+                return "invalid";
+            case ControlResult::SerialNotReady:
+                return "serial_not_ready";
+            case ControlResult::WriteFailed:
+                return "write_failed";
+            case ControlResult::AckTimeout:
+                return "ack_timeout";
+            case ControlResult::Nack:
+                return "nack";
+            case ControlResult::Busy:
+                return "busy";
+            default:
+                return "unknown";
         }
-        return crc;
     }
 
-    static uint16_t read_u16_le(const uint8_t *data) {
-        return static_cast<uint16_t>(data[0]) |
-            static_cast<uint16_t>(static_cast<uint16_t>(data[1]) << 8U);
+    uint8_t acoustic_modecontrol_cmd() const {
+        return acoustic_enabled_.load() ? ACOUSTIC_ENABLED : ACOUSTIC_DISABLED;
     }
 
-    static void write_u16_le(uint8_t *data, uint16_t value) {
-        data[0] = static_cast<uint8_t>(value & 0xFFU);
-        data[1] = static_cast<uint8_t>((value >> 8U) & 0xFFU);
-    }
-
-    // 【新增 3】处理来自上层的指令请求
-    void set_work_mode_callback(const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
-                                std::shared_ptr<std_srvs::srv::SetBool::Response> response) {
-        if (serial_fd_ < 0) {
-            response->success = false;
-            response->message = "底层串口未就绪";
+    void dvl_control_callback(const hal::msg::HalDvlControl::SharedPtr msg) {
+        if (msg->command == hal::msg::HalDvlControl::CMD_QUERY) {
+            RCLCPP_INFO(this->get_logger(), "DVL 声学状态查询: %s",
+                acoustic_enabled_.load() ? "开启" : "关闭");
             return;
         }
 
-        UdpResult result = UdpResult::Ok;
-        const bool ok = set_acoustic_mode_wait(request->data, result);
-        response->success = ok;
-        switch (result) {
-            case UdpResult::Ok:
-                response->message = "配置成功 (收到 ACK)";
-                break;
-            case UdpResult::SerialNotReady:
-                response->message = "底层串口未就绪";
-                break;
-            case UdpResult::Busy:
-                response->message = "已有 DVL 配置指令正在等待回执";
-                break;
-            case UdpResult::WriteFailed:
-                response->message = "下发指令到串口失败";
-                break;
-            case UdpResult::AckTimeout:
-                response->message = "等待 DVL 配置回执超时";
-                break;
-            case UdpResult::Nack:
-                response->message = "配置失败或被拒绝 (收到 NACK)";
-                break;
-            default:
-                response->message = "配置失败";
-                break;
+        if (msg->command != hal::msg::HalDvlControl::CMD_DISABLE &&
+            msg->command != hal::msg::HalDvlControl::CMD_ENABLE) {
+            RCLCPP_WARN(this->get_logger(), "DVL 控制指令非法: %u",
+                static_cast<unsigned int>(msg->command));
+            return;
         }
-        RCLCPP_INFO(this->get_logger(), "DVL 服务调用结果: %s", response->message.c_str());
+
+        ControlResult result = ControlResult::Ok;
+        const bool enable = (msg->command == hal::msg::HalDvlControl::CMD_ENABLE);
+        const bool ok = set_acoustic_mode_wait(enable, result);
+        RCLCPP_INFO(this->get_logger(), "DVL 声学%s结果: %s",
+            enable ? "开启" : "关闭",
+            ok ? "ok" : control_result_to_string(result));
     }
 
-    bool set_acoustic_mode_wait(bool enable, UdpResult &result) {
+    bool set_acoustic_mode_wait(bool enable, ControlResult &result) {
         if (serial_fd_ < 0) {
-            result = UdpResult::SerialNotReady;
+            result = ControlResult::SerialNotReady;
             return false;
         }
 
-        // true = y(声学工作)，false = n(声学关闭休眠)，需确保以 \n 结尾
         std::string cmd = enable ? "wcs,1500,,y,n\n" : "wcs,1500,,n,n\n";
 
         std::unique_lock<std::mutex> lock(cmd_mutex_);
         if (cmd_status_ == CmdStatus::WAITING) {
-            result = UdpResult::Busy;
+            result = ControlResult::Busy;
             return false;
         }
         cmd_status_ = CmdStatus::WAITING;
@@ -246,16 +210,15 @@ private:
         ssize_t bytes_written = write(serial_fd_, cmd.c_str(), cmd.length());
         if (bytes_written < 0) {
             cmd_status_ = CmdStatus::IDLE;
-            result = UdpResult::WriteFailed;
+            result = ControlResult::WriteFailed;
             return false;
         }
 
-        // 阻塞当前服务回调等待底层的回执唤醒，最大等待 2.0 秒防止死锁
         bool signaled = cmd_cv_.wait_for(lock, 2s, [this]{ return cmd_status_ != CmdStatus::WAITING; });
 
         if (!signaled) {
             cmd_status_ = CmdStatus::IDLE;
-            result = UdpResult::AckTimeout;
+            result = ControlResult::AckTimeout;
             RCLCPP_WARN(this->get_logger(), "DVL 模式切换指令响应超时");
             return false;
         }
@@ -263,7 +226,7 @@ private:
         const bool success = (cmd_status_ == CmdStatus::SUCCESS);
         cmd_status_ = CmdStatus::IDLE;
         if (!success) {
-            result = UdpResult::Nack;
+            result = ControlResult::Nack;
             return false;
         }
 
@@ -271,153 +234,8 @@ private:
         if (!enable) {
             mark_dvl_unavailable();
         }
-        result = UdpResult::Ok;
+        result = ControlResult::Ok;
         return true;
-    }
-
-    void stop_udp_control() {
-        udp_running_ = false;
-        if (udp_fd_ >= 0) {
-            close(udp_fd_);
-            udp_fd_ = -1;
-        }
-        if (udp_thread_.joinable()) {
-            udp_thread_.join();
-        }
-    }
-
-    bool open_udp_control_socket() {
-        const int port = this->get_parameter("acoustic_udp_port").as_int();
-        if (port < 1 || port > 65535) {
-            RCLCPP_ERROR(this->get_logger(), "DVL acoustic_udp_port 非法: %d", port);
-            return false;
-        }
-
-        udp_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
-        if (udp_fd_ < 0) {
-            RCLCPP_ERROR(this->get_logger(), "DVL UDP 控制 socket() 失败: %s", strerror(errno));
-            return false;
-        }
-
-        int reuse = 1;
-        setsockopt(udp_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(static_cast<uint16_t>(port));
-        addr.sin_addr.s_addr = INADDR_ANY;
-        if (bind(udp_fd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
-            RCLCPP_ERROR(this->get_logger(), "DVL UDP 控制 bind(:%d) 失败: %s", port, strerror(errno));
-            close(udp_fd_);
-            udp_fd_ = -1;
-            return false;
-        }
-
-        int flags = fcntl(udp_fd_, F_GETFL, 0);
-        if (flags < 0 || fcntl(udp_fd_, F_SETFL, flags | O_NONBLOCK) < 0) {
-            RCLCPP_ERROR(this->get_logger(), "DVL UDP 控制 fcntl(O_NONBLOCK) 失败: %s", strerror(errno));
-            close(udp_fd_);
-            udp_fd_ = -1;
-            return false;
-        }
-
-        RCLCPP_INFO(this->get_logger(), "DVL 声学 UDP 控制监听 :%d", port);
-        return true;
-    }
-
-    void udp_control_thread_function() {
-        while (rclcpp::ok() && udp_running_) {
-            if (udp_fd_ < 0 && !open_udp_control_socket()) {
-                std::this_thread::sleep_for(1s);
-                continue;
-            }
-
-            fd_set read_fds;
-            FD_ZERO(&read_fds);
-            FD_SET(udp_fd_, &read_fds);
-
-            timeval timeout{};
-            timeout.tv_sec = 0;
-            timeout.tv_usec = 100000;
-            const int ret = select(udp_fd_ + 1, &read_fds, nullptr, nullptr, &timeout);
-            if (ret < 0) {
-                if (errno == EBADF || !udp_running_) {
-                    break;
-                }
-                RCLCPP_WARN(this->get_logger(), "DVL UDP 控制 select() 异常: %s", strerror(errno));
-                continue;
-            }
-            if (ret == 0 || !FD_ISSET(udp_fd_, &read_fds)) {
-                continue;
-            }
-
-            uint8_t buffer[128]{};
-            sockaddr_in peer{};
-            socklen_t peer_len = sizeof(peer);
-            const ssize_t n = recvfrom(
-                udp_fd_, buffer, sizeof(buffer), 0,
-                reinterpret_cast<sockaddr *>(&peer), &peer_len);
-            if (n < 0) {
-                if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                    RCLCPP_WARN(this->get_logger(), "DVL UDP 控制 recvfrom() 异常: %s", strerror(errno));
-                }
-                continue;
-            }
-            handle_udp_control_packet(buffer, static_cast<size_t>(n), peer);
-        }
-    }
-
-    void handle_udp_control_packet(
-        const uint8_t *data,
-        size_t len,
-        const sockaddr_in &peer) {
-        uint8_t command = 0xFF;
-        uint16_t seq = 0;
-        UdpResult result = UdpResult::Invalid;
-
-        if (len == UDP_REQ_SIZE &&
-            data[0] == UDP_REQ_HEADER_0 &&
-            data[1] == UDP_REQ_HEADER_1) {
-            command = data[2];
-            seq = read_u16_le(data + 3);
-            const uint16_t received_crc = read_u16_le(data + 5);
-            const uint16_t expected_crc = crc16_modbus(data, 5);
-            if (received_crc != expected_crc) {
-                result = UdpResult::Invalid;
-            } else if (command == static_cast<uint8_t>(UdpCommand::Query)) {
-                result = UdpResult::Ok;
-            } else if (command == static_cast<uint8_t>(UdpCommand::Disable) ||
-                       command == static_cast<uint8_t>(UdpCommand::Enable)) {
-                set_acoustic_mode_wait(command == static_cast<uint8_t>(UdpCommand::Enable), result);
-            } else {
-                result = UdpResult::Invalid;
-            }
-        } else {
-            result = UdpResult::Invalid;
-        }
-
-        send_udp_control_response(peer, command, result, seq);
-    }
-
-    void send_udp_control_response(
-        const sockaddr_in &peer,
-        uint8_t command,
-        UdpResult result,
-        uint16_t seq) {
-        if (udp_fd_ < 0) return;
-
-        uint8_t response[UDP_RESP_SIZE]{};
-        response[0] = UDP_RESP_HEADER_0;
-        response[1] = UDP_RESP_HEADER_1;
-        response[2] = command;
-        response[3] = static_cast<uint8_t>(result);
-        response[4] = acoustic_enabled_.load() ? 0x01 : 0x00;
-        write_u16_le(response + 5, seq);
-        write_u16_le(response + 7, crc16_modbus(response, 7));
-
-        sendto(
-            udp_fd_, response, sizeof(response), 0,
-            reinterpret_cast<const sockaddr *>(&peer), sizeof(peer));
     }
 
     void send_startup_acoustic_mode() {
@@ -444,6 +262,7 @@ private:
     void mark_dvl_unavailable() {
         std::lock_guard<std::mutex> lock(msg_mutex_);
         cached_msg_.timestamp = this->now().nanoseconds();
+        cached_msg_.modecontrol_cmd = acoustic_modecontrol_cmd();
         cached_msg_.connection_status = 0;
         cached_msg_.velocity_x = 0.0f;
         cached_msg_.velocity_y = 0.0f;
@@ -464,6 +283,7 @@ private:
             if (last_ns == 0 || (now_ns - last_ns) > 2000000000LL) {
                 msg_to_publish.connection_status = 0;
             }
+            msg_to_publish.modecontrol_cmd = acoustic_modecontrol_cmd();
 
             dvl_pub_->publish(msg_to_publish);
         }
@@ -528,6 +348,7 @@ private:
 
         std::lock_guard<std::mutex> lock(msg_mutex_);
         cached_msg_.timestamp = capture_time_ns;
+        cached_msg_.modecontrol_cmd = acoustic_modecontrol_cmd();
         cached_msg_.connection_status = 1;
         last_valid_data_ns_.store(capture_time_ns);
 
@@ -602,26 +423,23 @@ private:
                                 line.pop_back();
                             }
                             RCLCPP_INFO(this->get_logger(), "=== [串口原始数据捕捉] ===: '%s'", line.c_str());
-                            // 【新增 4】拦截 DVL 的响应包并唤醒等待的服务线程
-                            // 假设协议中 wra 代表 ACK(成功)，wrn 代表 NACK(失败/无效请求)
                             if (line.find("wra") != std::string::npos) {
                                 std::lock_guard<std::mutex> lock(cmd_mutex_);
                                 if (cmd_status_ == CmdStatus::WAITING) {
                                     cmd_status_ = CmdStatus::SUCCESS;
-                                    cmd_cv_.notify_all(); // 通知服务回调：成功！
+                                    cmd_cv_.notify_all();
                                 }
-                                continue; // 这是控制协议，不再向下走速度解析
+                                continue;
                             } 
                             else if (line.find("wrn") != std::string::npos) {
                                 std::lock_guard<std::mutex> lock(cmd_mutex_);
                                 if (cmd_status_ == CmdStatus::WAITING) {
                                     cmd_status_ = CmdStatus::FAILED;
-                                    cmd_cv_.notify_all(); // 通知服务回调：失败！
+                                    cmd_cv_.notify_all();
                                 }
                                 continue; 
                             }
                             
-                            // 常规的速度报文向下交付解析
                             if (line.find("wrx") != std::string::npos || line.find("wrz") != std::string::npos) {
                                 parse_and_cache(line, capture_time_ns); 
                             }

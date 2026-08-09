@@ -3,9 +3,9 @@
  * @brief BSP层运动控制节点 —— 6-DOF 动力学前馈 + PID 反馈控制
  *
  * ## 输入 (Subscriptions)
- *   - /app/motioncontrol  (Float64MultiArray): 目标指令, data[1]~data[6] 依次为
- *         vx(m/s), vy(m/s), depth(m), yaw(rad), pitch_target(rad), roll_target(rad)
- *         其中 pitch / roll 目标内部强制置零 (当前不主动控制横摇/纵倾)
+ *   - /hal/modecontrol    (HalModeControl):     模式控制指令
+ *   - /hal/remotecontrol  (HalRemoteControl):   遥控通道量, 353~1695, 1024 为中位
+ *         其中 pitch / roll 当前保留, 内部强制置零
  *   - /hal/inertialnavi    (HalInertialnavi):   航行器姿态 (yaw/pitch/roll)
  *   - /hal/dvl             (HalDvl):            体坐标系速度 (vx/vy/vz)
  *   - /hal/depthsensor     (HalDepthsensor):     深度 (depth_avg)
@@ -65,6 +65,8 @@
  #include "hal/msg/hal_auxithruster.hpp"
  #include "hal/msg/hal_tailservo.hpp"
  #include "hal/msg/hal_wingservo.hpp"
+ #include "hal/msg/hal_mode_control.hpp"
+ #include "hal/msg/hal_remote_control.hpp"
  
  using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
  
@@ -75,6 +77,30 @@
      while (angle >  M_PI) angle -= 2.0 * M_PI;
      while (angle < -M_PI) angle += 2.0 * M_PI;
      return angle;
+ }
+
+ static constexpr double REMOTE_CHANNEL_MIN = 353.0;
+ static constexpr double REMOTE_CHANNEL_MID = 1024.0;
+ static constexpr double REMOTE_CHANNEL_MAX = 1695.0;
+ static constexpr double REMOTE_CHANNEL_HALF_RANGE =
+     REMOTE_CHANNEL_MAX - REMOTE_CHANNEL_MID;
+ static constexpr double REMOTE_CHANNEL_DEADBAND = 20.0;
+
+ inline double normalize_remote_channel(double value) {
+     const double clamped = std::clamp(value, REMOTE_CHANNEL_MIN, REMOTE_CHANNEL_MAX);
+     if (std::abs(clamped - REMOTE_CHANNEL_MID) <= REMOTE_CHANNEL_DEADBAND) {
+         return 0.0;
+     }
+     return std::clamp(
+         (clamped - REMOTE_CHANNEL_MID) / REMOTE_CHANNEL_HALF_RANGE,
+         -1.0,
+         1.0);
+ }
+
+ inline double map_remote_depth(double value) {
+     const double clamped = std::clamp(value, REMOTE_CHANNEL_MIN, REMOTE_CHANNEL_MAX);
+     return (clamped - REMOTE_CHANNEL_MIN) /
+         (REMOTE_CHANNEL_MAX - REMOTE_CHANNEL_MIN) * 10.0;
  }
  
  // ============================================================================
@@ -294,6 +320,8 @@
  
          // ----- 看门狗超时 (秒) -----
          this->declare_parameter<double>("cmd_timeout_s", 1.0);
+         this->declare_parameter<std::string>("mode_topic", "/hal/modecontrol");
+         this->declare_parameter<std::string>("remote_topic", "/hal/remotecontrol");
      }
  
      // ========================================================================
@@ -339,10 +367,13 @@
              "/hal/wingservo", qos_sensor,
              std::bind(&BspMotionControlNode::wing_servo_cb, this, std::placeholders::_1));
  
-         // -- 应用层目标指令订阅 (来自 app_motion_target_node) --
-         cmd_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
-             "/app/motioncontrol", qos_cmd,
-             std::bind(&BspMotionControlNode::cmd_cb, this, std::placeholders::_1));
+         // -- 模式与遥控通道订阅 (来自统一 UDP 接收节点) --
+         mode_sub_ = this->create_subscription<hal::msg::HalModeControl>(
+             this->get_parameter("mode_topic").as_string(), qos_cmd,
+             std::bind(&BspMotionControlNode::mode_cb, this, std::placeholders::_1));
+         remote_sub_ = this->create_subscription<hal::msg::HalRemoteControl>(
+             this->get_parameter("remote_topic").as_string(), qos_cmd,
+             std::bind(&BspMotionControlNode::remote_cb, this, std::placeholders::_1));
  
          // -- 推进器指令发布 --
          thruster_cmd_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
@@ -423,7 +454,8 @@
          imu_sub_.reset();   dvl_sub_.reset();   depth_sub_.reset();
          main_thruster_sub_.reset();  aux_thruster_sub_.reset();
          tail_servo_sub_.reset();     wing_servo_sub_.reset();
-         cmd_sub_.reset();
+         mode_sub_.reset();
+         remote_sub_.reset();
          thruster_cmd_pub_.reset();
          tail_cmd_pub_.reset();       wing_cmd_pub_.reset();
          control_timer_.reset();
@@ -612,46 +644,62 @@
      }
  
      // ========================================================================
-     // 目标指令回调
+     // 模式与遥控通道回调
      // ========================================================================
-     void cmd_cb(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
+     void mode_cb(const hal::msg::HalModeControl::SharedPtr msg) {
          if (!active_) return;
- 
-         // 取 data[1]~data[6] (第二~第七项) 作为六自由度目标
-         if (msg->data.size() < 7) {
-             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
-                 "[MC] /app/motioncontrol 数据长度不足 (需>=7, 实际=%zu)", msg->data.size());
+
+         if (msg->command == hal::msg::HalModeControl::CMD_ENABLE_PID) {
+             std::lock_guard<std::mutex> lock(cmd_mutex_);
+             pid_mode_enabled_ = true;
+             target_ = TargetSetpoint{};
+             last_cmd_time_ = std::chrono::steady_clock::now();
+             reset_all_pid();
+             RCLCPP_INFO(get_logger(), "[MC] PID mode enabled");
              return;
          }
-         if (!std::all_of(msg->data.begin(), msg->data.begin() + 7,
+         if (msg->command == hal::msg::HalModeControl::CMD_DISABLE_PID) {
+             {
+                 std::lock_guard<std::mutex> lock(cmd_mutex_);
+                 pid_mode_enabled_ = false;
+                 target_ = TargetSetpoint{};
+             }
+             reset_all_pid();
+             send_zero_thrust();
+             RCLCPP_INFO(get_logger(), "[MC] PID mode disabled");
+         }
+     }
+
+     void remote_cb(const hal::msg::HalRemoteControl::SharedPtr msg) {
+         if (!active_) return;
+
+         const std::array<double, 6> channels = {
+             static_cast<double>(msg->surge),
+             static_cast<double>(msg->sway),
+             static_cast<double>(msg->heave),
+             static_cast<double>(msg->yaw),
+             static_cast<double>(msg->pitch),
+             static_cast<double>(msg->roll),
+         };
+         if (!std::all_of(channels.begin(), channels.end(),
                  [](double value) { return std::isfinite(value); })) {
              RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
-                 "[MC] /app/motioncontrol contains a non-finite value");
+                 "[MC] /hal/remotecontrol contains a non-finite value");
              return;
          }
-         if (msg->data[0] != 0.0) {
-             if (msg->data[0] == 1.0) {
-                 clear_target_state();
-                 send_zero_thrust();
-             } else {
-                 RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
-                     "[MC] /app/motioncontrol contains unsupported control flags");
-             }
-             return;
-         }
- 
+
          TargetSetpoint sp;
-         sp.vx    = msg->data[1];   // 纵荡速度目标
-         sp.vy    = msg->data[2];   // 横荡速度目标
-         sp.depth = msg->data[3];   // 深度目标
-         sp.yaw   = msg->data[4];   // 艏向目标
-         // data[5], data[6] 读取但不使用——pitch/roll 强制归零
+         sp.vx    = normalize_remote_channel(channels[0]) * 1.0;   // m/s
+         sp.vy    = normalize_remote_channel(channels[1]) * 0.5;   // m/s
+         sp.depth = map_remote_depth(channels[2]);                 // m
+         sp.yaw   = normalize_remote_channel(channels[3]) * M_PI;  // rad
          sp.pitch = 0.0;
          sp.roll  = 0.0;
          sp.valid = true;
- 
+
          {
              std::lock_guard<std::mutex> lock(cmd_mutex_);
+             if (!pid_mode_enabled_) return;
              target_ = sp;
              last_cmd_time_ = std::chrono::steady_clock::now();
          }
@@ -667,10 +715,16 @@
          TargetSetpoint target;
          VehicleState   state;
          std::chrono::steady_clock::time_point last_cmd;
+         bool pid_mode_enabled = false;
          {
              std::lock_guard<std::mutex> lock1(cmd_mutex_);
              target   = target_;
              last_cmd = last_cmd_time_;
+             pid_mode_enabled = pid_mode_enabled_;
+         }
+         if (!pid_mode_enabled) {
+             send_zero_thrust();
+             return;
          }
          {
              std::lock_guard<std::mutex> lock2(state_mutex_);
@@ -1015,6 +1069,7 @@
      bool en_pid_    = true;
      bool en_servo_  = false;
      double cmd_timeout_s_ = 1.0;
+     bool pid_mode_enabled_ = false;
  
      // -- ROS2 接口 --
      rclcpp::Subscription<hal::msg::HalInertialnavi>::SharedPtr  imu_sub_;
@@ -1024,7 +1079,8 @@
      rclcpp::Subscription<hal::msg::HalAuxithruster>::SharedPtr  aux_thruster_sub_;
      rclcpp::Subscription<hal::msg::HalTailservo>::SharedPtr     tail_servo_sub_;
      rclcpp::Subscription<hal::msg::HalWingservo>::SharedPtr     wing_servo_sub_;
-     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr cmd_sub_;
+     rclcpp::Subscription<hal::msg::HalModeControl>::SharedPtr       mode_sub_;
+     rclcpp::Subscription<hal::msg::HalRemoteControl>::SharedPtr     remote_sub_;
  
      std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::Float64MultiArray>>
          thruster_cmd_pub_;
