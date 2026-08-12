@@ -56,7 +56,7 @@ public:
         timer_ = this->create_wall_timer(
             std::chrono::milliseconds(20), std::bind(&HalThrusterNode::timer_general_callback, this));
 
-        hardware_api_init_can("can2");
+        hardware_api_init_can("can3");
         return CallbackReturn::SUCCESS;
     }
 
@@ -118,10 +118,10 @@ public:
 
 private:
     // --- 常量定义 ---
-    const uint32_t MAIN_THRUSTER_ID = 0x01; 
+    const uint32_t MAIN_THRUSTER_ID = 0x06; 
     const int64_t ONLINE_TIMEOUT_MS = 4000; // 2秒未收到反馈判定为离线
     
-    // 【架构修补】：实际硬件存在的 5 个辅推 ID (避开主推的 1 号 ID)
+    // 实际使用的 5 个辅推电调 ID：1、2、3、4、5；主推 ID 为 6
     const std::array<uint8_t, 5> ACTIVE_AUX_IDS = {1, 2, 3, 4, 5};
 
     // --- 状态控制变量 ---
@@ -287,17 +287,30 @@ private:
     }
 
     void cmd_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
-        if (this->get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) return;
-        if (is_estopped_ || is_testing_ || is_emergency_ascending_) return; 
+        if (this->get_current_state().id() !=
+            lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE)
+            return;
 
-        if (msg->data.size() >= 1) {
-            set_thruster_rpm_hardware(MAIN_THRUSTER_ID, msg->data[0]);  
+        if (is_estopped_ || is_testing_ || is_emergency_ascending_)
+            return;
+
+        if (msg->data.size() < 6) {
+            RCLCPP_WARN(
+                get_logger(),
+                "推进器控制指令长度不足：收到 %zu，期望至少 6",
+                msg->data.size());
+            return;
         }
 
-        // 接收话题数据 (msg 中从索引 1~5 对应 5 个实装推进器)
-        for (size_t i = 1; i < msg->data.size() && i <= 5; ++i) {
-            aux_target_pct_[i - 1].store(msg->data[i]);
+        // ID1~ID5：5 个辅推
+        for (size_t i = 0; i < 5; ++i) {
+            aux_target_pct_[i].store(msg->data[i]);
         }
+
+        // ID6：主推
+        set_thruster_rpm_hardware(
+            MAIN_THRUSTER_ID,
+            msg->data[5]);
     }
 
     void stop_all_thrusters() {
@@ -319,48 +332,76 @@ private:
     }
 
     // --- 精确组装辅推控制帧 (处理 ID 跳跃) ---
+
     void send_aux_control_commands() {
         int fd;
         {
             std::lock_guard<std::mutex> lock(can_socket_mutex_);
             fd = can_socket_.load();
         }
+
         if (fd < 0) return;
 
+        // 厂家协议固定分组：
+        // 0x200 → 电调 ID0~ID3
+        // 0x201 → 电调 ID4~ID7
+        // 本机实际使用辅推 ID1~ID5，因此 ID0、ID6、ID7 槽位仅写停止值
         for (int group = 0; group < 2; ++group) {
+
             struct can_frame frame;
-            frame.can_id = 0x200 + group; 
+            frame.can_id = 0x200 + group;
             frame.can_dlc = 8;
             std::memset(frame.data, 0, 8);
-    
+
             for (int i = 0; i < 4; ++i) {
-                uint8_t target_id = group * 4 + i;  // 推算出当前的物理 ID: 0,1,2,3...
-                int mem_idx = get_aux_index(target_id); 
-                
-                uint16_t cmd_word;
-                if (mem_idx != -1) {
-                    // 这是我们要控制的 6 个节点之一
-                    double target_pct = is_estopped_ ? 0.0 : aux_target_pct_[mem_idx].load();
-                    cmd_word = calculate_aux_cmd_word(target_pct);
+
+            // 厂家协议从电调 ID0 开始分槽：
+            // group=0 -> ID0,1,2,3；group=1 -> ID4,5,6,7
+            uint8_t target_id =
+                static_cast<uint8_t>(group * 4 + i);
+
+            int mem_idx = get_aux_index(target_id);
+
+            uint16_t cmd_word;
+
+                if (mem_idx >= 0) {
+
+                    double target_pct =
+                        is_estopped_
+                        ? 0.0
+                        : aux_target_pct_[mem_idx].load();
+
+                    cmd_word =
+                        calculate_aux_cmd_word(target_pct);
+
                 } else {
-                    // 这是被跳过的节点 (如 ID=1, ID=7)，强行写入死区中位值，防止发散
-                    cmd_word = 1000; 
+
+                    // ID0、ID6、ID7 不属于当前 5 个辅推，保持原逻辑写停止值 1000
+                    cmd_word = 1000;
                 }
 
-                frame.data[i * 2]     = cmd_word & 0xFF;
-                frame.data[i * 2 + 1] = (cmd_word >> 8) & 0xFF;
+                frame.data[i * 2] =
+                    cmd_word & 0xFF;
+
+                frame.data[i * 2 + 1] =
+                    (cmd_word >> 8) & 0xFF;
             }
-    
-            ssize_t bytes_written = write(fd, &frame, sizeof(struct can_frame));
+
+            ssize_t bytes_written =
+                write(fd, &frame, sizeof(struct can_frame));
+
             if (bytes_written < 0) {
-                if (errno == ENETDOWN || errno == ENODEV || errno == EBADF) {
-                    hardware_api_close_can(); 
+
+                if (errno == ENETDOWN ||
+                    errno == ENODEV ||
+                    errno == EBADF) {
+
+                    hardware_api_close_can();
                     break;
                 }
             }
         }
     }
-    
     void set_thruster_rpm_hardware(uint32_t target_node_id, double thrust_percentage) {
         int fd;
         {
@@ -407,7 +448,7 @@ private:
                 current_fd = can_socket_.load();
             }
             if (current_fd < 0) {
-                if (hardware_api_init_can("can2")) {
+                if (hardware_api_init_can("can3")) {
                     RCLCPP_INFO(get_logger(), "�� CAN 总线重连恢复工作！");
                 } else {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -448,7 +489,7 @@ private:
                 }
                 
                 // 2. 辅推 50Hz 自主流解析 (依赖映射函数精准过滤无关报文)
-                else if (clean_id >= 0x300 && clean_id <= 0x306 && frame.can_dlc == 8) {
+                else if (clean_id >= 0x301 && clean_id <= 0x305 && frame.can_dlc == 8) {
                     uint8_t aux_id = clean_id - 0x300; 
                     int mem_idx = get_aux_index(aux_id);
                     
@@ -564,7 +605,7 @@ private:
         return true;
     }
 
-    bool hardware_api_init_can(const std::string& can_iface = "can2") {
+    bool hardware_api_init_can(const std::string& can_iface = "can3") {
         {
             std::lock_guard<std::mutex> lock(can_socket_mutex_);
             if (can_socket_.load() >= 0) return true;
