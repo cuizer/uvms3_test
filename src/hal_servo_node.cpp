@@ -8,7 +8,11 @@
 #include <mutex>
 #include <atomic>
 #include <fcntl.h>
-#include <termios.h>
+#include <linux/can.h>
+#include <linux/can/raw.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
 #include <unistd.h>
 #include <cerrno>
 
@@ -109,7 +113,7 @@ public:
     }
 
     CallbackReturn on_deactivate(const rclcpp_lifecycle::State & state) override {
-        RCLCPP_INFO(get_logger(), "舵机节点停用，终止测试并强制舵机回中。");
+        RCLCPP_INFO(get_logger(), "舵机节点停用，触发急停：释放所有舵机力矩。");
         timer_->cancel(); // 停用状态挂起定时器
         
         is_testing_ = false; // 触发自检退出
@@ -117,9 +121,7 @@ public:
 
         pub_tail_status_->on_deactivate();
         pub_wing_status_->on_deactivate();
-        set_tail_servos_hardware({0.0, 0.0, 0.0, 0.0});
-        set_wing_servos_hardware({0.0, 0.0});
-        send_stop_command_to_all(true); // 保持锁力
+        send_stop_command_to_all(false); // 释放锁力
         LifecycleNode::on_deactivate(state);
         return CallbackReturn::SUCCESS;
     }
@@ -199,8 +201,24 @@ private:
         std::lock_guard<std::mutex> lock(serial_write_mutex_);
         if (serial_fd_ < 0) return;
 
-        write(serial_fd_, data.data(), data.size());
-        // 故意移除 tcdrain，使用底层异步发送
+        // 设置目标 CAN ID 为 10
+        uint32_t TARGET_CAN_ID = 0x10; 
+
+        size_t bytes_sent = 0;
+        while (bytes_sent < data.size()) {
+            struct can_frame frame;
+            memset(&frame, 0, sizeof(frame));
+            frame.can_id = TARGET_CAN_ID;
+            
+            // 计算当前帧的发包长度 (不能超过 CAN 标准的 8 字节)
+            size_t chunk_size = std::min(static_cast<size_t>(8), data.size() - bytes_sent);
+            frame.can_dlc = chunk_size;
+
+            std::memcpy(frame.data, data.data() + bytes_sent, chunk_size);
+            write(serial_fd_, &frame, sizeof(struct can_frame));
+            
+            bytes_sent += chunk_size;
+        }
     }
 
     // ==========================================
@@ -211,21 +229,27 @@ private:
         uint8_t cmd_id = 0, length = 0, checksum = 0;
         std::vector<uint8_t> payload;
         
-        // 使用块读取，大幅降低 read 系统调用开销
-        uint8_t buffer[256];
+        // 期望接收的 CAN ID
+        uint32_t EXPECTED_CAN_ID = 0x10;
 
         while (keep_reading_) {
-            int bytes_read = read(serial_fd_, buffer, sizeof(buffer));
-            if (bytes_read > 0) {
-                for (int i = 0; i < bytes_read; ++i) {
-                    uint8_t byte = buffer[i];
+            struct can_frame frame;
+            int bytes_read = read(serial_fd_, &frame, sizeof(struct can_frame));
+            
+            if (bytes_read == sizeof(struct can_frame)) {
+                // 如果总线杂乱，可以过滤掉不是模块发来的数据
+                // if (frame.can_id != EXPECTED_CAN_ID) continue;
+
+                // 拆解 CAN 帧数据，喂给原有状态机
+                for (int i = 0; i < frame.can_dlc; ++i) {
+                    uint8_t byte = frame.data[i];
+                    
                     switch(state) {
                         case 0: if (byte == 0x05) state = 1; break;
                         case 1: if (byte == 0x1C) state = 2; else state = (byte == 0x05) ? 1 : 0; break;
                         case 2: cmd_id = byte; state = 3; break;
                         case 3: 
                             length = byte; 
-                            // 异常长度防御
                             if (length > 64) { state = 0; break; }
                             payload.clear(); 
                             state = (length > 0) ? 4 : 5; 
@@ -418,33 +442,35 @@ private:
     // ⚙️ 硬件底层接口
     // ==========================================
     void hardware_api_init() {
-        std::string port_name = "/dev/ttyTHS0";
-        serial_fd_ = open(port_name.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK); // O_NONBLOCK 防卡死
+        std::string can_interface = "can3"; // 主控板的 CAN 接口
+        
+        serial_fd_ = socket(PF_CAN, SOCK_RAW, CAN_RAW);
         if (serial_fd_ < 0) {
-            RCLCPP_ERROR(get_logger(), "无法打开串口 %s: %s", port_name.c_str(), strerror(errno));
+            RCLCPP_ERROR(get_logger(), "无法创建 CAN Socket: %s", strerror(errno));
             return;
         }
-    
-        struct termios opt; 
-        tcgetattr(serial_fd_, &opt);
+
+        struct ifreq ifr;
+        strcpy(ifr.ifr_name, can_interface.c_str());
+        ioctl(serial_fd_, SIOCGIFINDEX, &ifr);
+
+        struct sockaddr_can addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.can_family = AF_CAN;
+        addr.can_ifindex = ifr.ifr_ifindex;
+
+        // 设置为非阻塞模式，防止读取线程死锁c
+        int flags = fcntl(serial_fd_, F_GETFL, 0);
+        fcntl(serial_fd_, F_SETFL, flags | O_NONBLOCK);
+
+        if (bind(serial_fd_, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            RCLCPP_ERROR(get_logger(), "无法绑定 CAN 接口 %s: %s", can_interface.c_str(), strerror(errno));
+            close(serial_fd_);
+            serial_fd_ = -1;
+            return;
+        }
         
-        cfsetispeed(&opt, B115200); 
-        cfsetospeed(&opt, B115200);
-    
-        opt.c_cflag &= ~CSIZE;                  
-        opt.c_cflag |= (CS8 | CLOCAL | CREAD);  
-        opt.c_cflag &= ~(PARENB | CSTOPB);      
-    
-        opt.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG); 
-        opt.c_oflag &= ~OPOST;                  
-    
-        opt.c_cc[VMIN] = 0;  
-        opt.c_cc[VTIME] = 0; // 配合非阻塞轮询释放 CPU
-    
-        tcflush(serial_fd_, TCIFLUSH); 
-        tcsetattr(serial_fd_, TCSANOW, &opt);
-        
-        RCLCPP_INFO(get_logger(), "串口 %s 初始化成功，波特率 115200。", port_name.c_str());
+        RCLCPP_INFO(get_logger(), "SocketCAN 接口 %s 初始化成功，通信目标 ID: 10", can_interface.c_str());
     }
 
     void set_tail_servos_hardware(const std::vector<double>& a) { for(size_t i=0; i<a.size(); ++i) send_angle_command(i, a[i]); }
