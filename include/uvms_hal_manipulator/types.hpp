@@ -13,7 +13,7 @@ namespace uvms_hal_manipulator
 constexpr uint8_t APP_MSG_ID_ARMCABIN_MOTOR_DATA = 0x09;
 constexpr uint8_t APP_MSG_ID_ARM_MOTOR_DATA      = 0x0A;
 constexpr uint8_t APP_MSG_ID_ARM_CONTROLLER_DATA = 0x0B;
-constexpr uint8_t APP_MSG_ID_ARM_CONTROL_CMD     = 0x10;
+constexpr uint8_t APP_MSG_ID_ARM_CONTROL_CMD     = 0x32;
 
 constexpr uint32_t CAN_ID_ARMCABIN_MOTOR_DATA = 0x09;
 constexpr uint32_t CAN_ID_ARM_MOTOR_DATA      = 0x0A;
@@ -22,10 +22,12 @@ constexpr uint32_t CAN_ID_ARM_CONTROL_CMD     = 0x10;
 
 enum class ArmControlCommand : uint8_t
 {
-    CABIN_OPEN  = 0x01,
-    CABIN_CLOSE = 0x02,
-    ARM_EXTEND  = 0x03,
-    ARM_RETRACT = 0x04
+    CABIN_OPEN         = 0x01,
+    CABIN_CLOSE        = 0x02,
+    ARM_EXTEND         = 0x03,
+    ARM_RETRACT        = 0x04,
+    DATA_UPLOAD_ENABLE = 0x05,
+    DATA_UPLOAD_DISABLE = 0x06
 };
 
 struct CanFrame

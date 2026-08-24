@@ -57,6 +57,19 @@ def generate_launch_description():
             'csv_log_directory': 'armmotor_logs',
             'csv_log_file_prefix': 'armmotor',
             'csv_flush_every_n': 50,
+            # 当前聚合10个关节电机。夹爪驱动就绪后改为2，即可扩展为12个。
+            'joint_motor_count': 10,
+            'gripper_motor_count': 0,
+            'gripper_motor_topic': '/hal/grippermotor',
+            'arm_control_topic': '/hal/armcontrol',
+            # 0x03伸出、0x04回收动作预设已启用，位置单位为rad。
+            'motion_presets_enabled': True,
+            'left_extend_positions': [1.0, 1.0, 0.5, 0.5, 0.5],
+            'right_extend_positions': [1.0, 1.0, 0.5, 0.5, 0.5],
+            'left_retract_positions': [0.0, 0.0, 0.0, 0.0, 0.0],
+            'right_retract_positions': [0.0, 0.0, 0.0, 0.0, 0.0],
+            'extend_duration_sec': 5.0,
+            'retract_duration_sec': 8.0,
         }]
     )
 

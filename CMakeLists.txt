@@ -85,9 +85,18 @@ ament_target_dependencies(manipulator_driver
 add_executable(dual_arm_lifecycle_manager src/uvms_hal_manipulator/dual_arm_manager.cpp)
 ament_target_dependencies(dual_arm_lifecycle_manager rclcpp std_msgs lifecycle_msgs)
 
-# 3. 关节电机节点
-add_executable(armmotor src/uvms_hal_manipulator/armmotor.cpp)
-ament_target_dependencies(armmotor rclcpp)
+# 3. 关节电机状态聚合与统一控制节点
+add_executable(
+  armmotor
+  src/uvms_hal_manipulator/armmotor.cpp
+)
+
+ament_target_dependencies(
+  armmotor
+  rclcpp
+  std_msgs
+  trajectory_msgs
+)
 
 # 4. 机械臂轨迹规划节点
 add_executable(bsp_arm_trajectory_node src/uvms_hal_manipulator/bsp_arm_trajectory_node.cpp)
